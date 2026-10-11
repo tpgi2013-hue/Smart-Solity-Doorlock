@@ -31,10 +31,9 @@
         "title": "Smart Solity options",
         "data": {
           "log_seconds": "Event-log poll interval (seconds)",
-          "status_minutes": "Status/battery poll interval (minutes)",
-          "auto_close_seconds": "Auto-lock close delay (seconds)"
+          "status_minutes": "Status/battery poll interval (minutes)"
         },
-        "description": "Event-log polling (5-600s) reads the cloud log — it does NOT wake the lock, so it can be fast. Status polling (1-1440 min) wakes the lock for battery/deadbolt, so keep it slow. The lock only logs opens, so a synthetic 'close (auto)' event is emitted this many seconds (1-300) after each open to mark the auto-lock and revert the lock state to locked."
+        "description": "Event-log polling (5-600s) reads the cloud log — it does NOT wake the lock, so it can be fast. Status polling (1-1440 min) wakes the lock for battery/deadbolt, so keep it slow. The lock state is the real deadbolt: after every open the lock is re-polled a few times (5s, 10s, 20s, … up to 15 min) until the motor has locked again."
       }
     }
   },

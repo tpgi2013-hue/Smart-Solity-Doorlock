@@ -50,6 +50,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: SolityConfigEntry) -> bo
     await log.async_config_entry_first_refresh()
 
     entry.runtime_data = SolityData(status=status, log=log)
+    # New open in the event log -> invalidate cached deadbolt + verify it.
+    entry.async_on_unload(status.attach_log(log))
     entry.async_on_unload(entry.add_update_listener(_async_update_listener))
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
