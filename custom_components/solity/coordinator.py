@@ -53,6 +53,11 @@ class SolityStatusCoordinator(DataUpdateCoordinator[dict]):
         self.last_poll_ok = False
         self._verify_task: asyncio.Task | None = None
         self._last_log_dt: str | None = None
+        # Outcome of the latest verify burst, for tuning LOCK_VERIFY_OFFSETS:
+        # seconds after the open was detected, and how many polls it took.
+        self.last_verify_seconds: int | None = None
+        self.last_verify_polls: int | None = None
+        self.last_verify_result: str | None = None  # locked / still_unlocked
 
     # ------------------------------------------------------------------ poll
     async def _async_update_data(self) -> dict:
@@ -135,22 +140,32 @@ class SolityStatusCoordinator(DataUpdateCoordinator[dict]):
     async def _async_verify(self) -> None:
         loop = asyncio.get_running_loop()
         start = loop.time()
+        polls = 0
         try:
             for offset in LOCK_VERIFY_OFFSETS:
                 delay = start + offset - loop.time()
                 if delay > 0:
                     await asyncio.sleep(delay)
                 await self.async_refresh()
+                polls += 1
                 if self.last_poll_ok and self.is_locked:
-                    _LOGGER.debug("Solity deadbolt locked after %ss", offset)
+                    self._record_verify(offset, polls, "locked")
                     return
-            _LOGGER.debug(
-                "Solity deadbolt still unlocked after %ss; back to normal polling",
-                LOCK_VERIFY_OFFSETS[-1],
-            )
+            self._record_verify(LOCK_VERIFY_OFFSETS[-1], polls, "still_unlocked")
         finally:
-            self._verify_task = None
-            self.async_update_listeners()
+            # A newer open may have replaced this task; don't clobber it.
+            if self._verify_task is asyncio.current_task():
+                self._verify_task = None
+                self.async_update_listeners()
+
+    @callback
+    def _record_verify(self, seconds: int, polls: int, result: str) -> None:
+        self.last_verify_seconds = seconds
+        self.last_verify_polls = polls
+        self.last_verify_result = result
+        _LOGGER.info(
+            "Solity deadbolt verify: %s after %ss (%s polls)", result, seconds, polls
+        )
 
     @callback
     def attach_log(self, log: SolityLogCoordinator) -> CALLBACK_TYPE:

@@ -75,17 +75,19 @@ async def test_door_held_open_then_locks(hass, freezer):
     assert hass.states.get(LOCK).state == "unlocked"
     assert events == ["open"]
 
-    # 5s, 10s, 20s polls: still held open -> must stay unlocked (old bug: locked)
+    # 3s, 8s, 15s, 30s polls: still held open -> must stay unlocked (old bug: locked)
     for _ in range(3):
         freezer.tick(timedelta(seconds=10)); await _tick(hass, 0)
         assert hass.states.get(LOCK).state == "unlocked"
     assert "close" not in events
 
-    # door closes, motor locks -> next verify poll confirms
+    # door closes, motor locks -> next verify poll (60s) confirms
     fake.deadbolt = 1
-    freezer.tick(timedelta(seconds=25)); await _tick(hass, 0)
+    freezer.tick(timedelta(seconds=35)); await _tick(hass, 0)
     st = hass.states.get(LOCK)
     assert st.state == "locked" and st.attributes["confirmed"] is True
+    assert st.attributes["last_verify_seconds"] == 60
+    assert st.attributes["last_verify_polls"] == 5
     assert events == ["open", "close"]
     calls = fake.status_calls
     # verify burst stopped
@@ -114,6 +116,34 @@ async def test_quick_entry_confirms_on_first_poll(hass, freezer):
     freezer.tick(timedelta(seconds=10)); await _tick(hass, 0)
     before = fake.status_calls
     freezer.tick(timedelta(seconds=6)); await _tick(hass, 0)
-    assert hass.states.get(LOCK).state == "locked"
+    st = hass.states.get(LOCK)
+    assert st.state == "locked"
     assert fake.status_calls - before == 1
+    assert st.attributes["last_verify_seconds"] == 3
+    assert st.attributes["last_verify_polls"] == 1
+    assert st.attributes["last_verify_result"] == "locked"
+    assert st.attributes["verifying"] is False
+    p.stop()
+
+
+async def test_second_open_restarts_single_verify(hass, freezer):
+    fake = Fake()
+    _, p = await _setup(hass, fake)
+    fake.deadbolt = 0
+    fake.logs.insert(0, _log("2026-10-12 07:20:00"))
+    freezer.tick(timedelta(seconds=10)); await _tick(hass, 0)
+    assert hass.states.get(LOCK).attributes["verifying"] is True
+    # another open while the first burst is still running
+    fake.logs.insert(0, _log("2026-10-12 07:20:12"))
+    freezer.tick(timedelta(seconds=10)); await _tick(hass, 0)
+    st = hass.states.get(LOCK)
+    assert st.state == "unlocked" and st.attributes["verifying"] is True
+    # exactly one burst keeps running: lock -> confirmed once, then quiet
+    fake.deadbolt = 1
+    freezer.tick(timedelta(seconds=4)); await _tick(hass, 0)
+    st = hass.states.get(LOCK)
+    assert st.state == "locked" and st.attributes["verifying"] is False
+    calls = fake.status_calls
+    freezer.tick(timedelta(seconds=900)); await _tick(hass, 0)
+    assert fake.status_calls == calls
     p.stop()

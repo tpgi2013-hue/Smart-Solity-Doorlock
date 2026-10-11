@@ -67,6 +67,11 @@ class SolityLock(CoordinatorEntity[SolityStatusCoordinator], LockEntity):
             "verifying": self.coordinator.verifying,
             # False = value is assumed (open seen / poll missed), not read back.
             "confirmed": self.coordinator.last_poll_ok,
+            # Latest post-open verify: seconds after the open was detected and
+            # how many status polls it took (tuning data for the offsets).
+            "last_verify_seconds": self.coordinator.last_verify_seconds,
+            "last_verify_polls": self.coordinator.last_verify_polls,
+            "last_verify_result": self.coordinator.last_verify_result,
         }
 
     async def async_lock(self, **kwargs: Any) -> None:
