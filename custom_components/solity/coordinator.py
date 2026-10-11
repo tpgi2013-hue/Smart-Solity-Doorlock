@@ -6,6 +6,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from homeassistant.components import persistent_notification
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
 from homeassistant.exceptions import ConfigEntryAuthFailed
@@ -13,10 +14,13 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 from homeassistant.util import dt as dt_util
 
 from .api import SolityAuthError, SolityClient, SolityError
+from .calibration import BASIS_DETECT, BASIS_OPEN, SolityCalibration, build_schedule
 from .const import (
+    CLOCK_AHEAD_TOLERANCE_SECONDS,
     DOMAIN,
     LOCK_VERIFY_OFFSETS,
     LOG_UTC_OFFSET_HOURS,
+    MAX_DETECT_LAG_SECONDS,
     MEASURE_MAX_POLLS,
     MEASURE_MIN_INTERVAL,
     MEASURE_WINDOW_SECONDS,
@@ -44,6 +48,20 @@ def _secs(a: datetime | None, b: datetime | None) -> float | None:
     return round((b - a).total_seconds(), 1)
 
 
+def clock_ok(open_at: datetime | None, detected_at: datetime) -> bool:
+    """True if the lock's logged open time is plausible against HA's clock."""
+    if open_at is None:
+        return False
+    lag = (detected_at - open_at).total_seconds()
+    return -CLOCK_AHEAD_TOLERANCE_SECONDS <= lag <= MAX_DETECT_LAG_SECONDS
+
+
+SOURCE_CALIBRATING = "calibrating"
+SOURCE_CALIBRATED = "calibrated"
+SOURCE_MANUAL = "manual"
+SOURCE_DEFAULT = "default"
+
+
 class SolityStatusCoordinator(DataUpdateCoordinator[dict]):
     """Polls door-lock status (battery, deadbolt). Wakes the lock, so run slow.
 
@@ -60,7 +78,9 @@ class SolityStatusCoordinator(DataUpdateCoordinator[dict]):
         client: SolityClient,
         device_id: str,
         status_minutes: int,
-        measure_mode: bool = False,
+        calibration: SolityCalibration,
+        auto_calibrate: bool = True,
+        manual_first: float = 0,
     ) -> None:
         super().__init__(
             hass,
@@ -79,11 +99,13 @@ class SolityStatusCoordinator(DataUpdateCoordinator[dict]):
         self._last_log_dt: str | None = None
         # Outcome of the latest verify burst, for tuning LOCK_VERIFY_OFFSETS:
         # seconds after the open was detected, and how many polls it took.
-        self.last_verify_seconds: int | None = None
+        self.last_verify_seconds: float | None = None
         self.last_verify_polls: int | None = None
         self.last_verify_result: str | None = None  # locked / still_unlocked
-        # Measurement mode: back-to-back polls after an open (see const).
-        self.measure_mode = measure_mode
+        # Per-home schedule: auto-calibration and/or a manual first poll.
+        self.calibration = calibration
+        self.auto_calibrate = auto_calibrate
+        self.manual_first = float(manual_first or 0)
         self.last_measurement: dict[str, Any] | None = None
 
     # ------------------------------------------------------------------ poll
@@ -153,12 +175,42 @@ class SolityStatusCoordinator(DataUpdateCoordinator[dict]):
         self.last_poll_ok = False
         self.async_set_updated_data(data)
 
+    # -------------------------------------------------------------- schedule
+    @property
+    def calibrating(self) -> bool:
+        """Measuring entries (back-to-back polls) to calibrate this home."""
+        return self.auto_calibrate and not self.calibration.complete
+
+    @property
+    def schedule_source(self) -> str:
+        if self.manual_first > 0:
+            return SOURCE_MANUAL
+        if self.calibrating:
+            return SOURCE_CALIBRATING
+        if self.auto_calibrate and self.calibration.complete:
+            return SOURCE_CALIBRATED
+        return SOURCE_DEFAULT
+
+    @property
+    def verify_schedule(self) -> tuple[tuple[float, ...], str]:
+        """(offsets in seconds, basis) used after an open."""
+        source = self.schedule_source
+        if source == SOURCE_MANUAL:
+            first = self.manual_first
+            return build_schedule(first, max(first * 1.5, first + 2)), BASIS_OPEN
+        if source == SOURCE_CALIBRATED:
+            result = self.calibration.result or {}
+            return tuple(result["schedule"]), result.get("basis", BASIS_DETECT)
+        return LOCK_VERIFY_OFFSETS, BASIS_DETECT
+
+    # ---------------------------------------------------------------- verify
     @callback
     def start_verify(self, open_at: datetime | None = None) -> None:
         """(Re)start the post-open burst of status polls.
 
-        ``open_at`` is the lock's own timestamp of the open (from the log), used
-        by measurement mode to time the relock from the real open.
+        ``open_at`` is the lock's own timestamp of the open (from the log): the
+        calibrated schedule is anchored to it, so detection lag doesn't shift
+        it, and calibration measures relock times from it.
         """
         if self._verify_task is not None and not self._verify_task.done():
             self._verify_task.cancel()
@@ -169,20 +221,31 @@ class SolityStatusCoordinator(DataUpdateCoordinator[dict]):
         self.async_update_listeners()
 
     async def _async_verify(self, open_at: datetime | None = None) -> None:
-        loop = asyncio.get_running_loop()
-        start = loop.time()
+        detected_at = dt_util.utcnow()
         polls = 0
         measured = False
         try:
-            if self.measure_mode:
-                polls = await self._async_measure(start, open_at)
+            if self.calibrating:
+                polls = await self._async_measure(detected_at, open_at)
                 if polls < 0:  # locked within the measurement window
                     return
                 measured = True
-            for offset in LOCK_VERIFY_OFFSETS:
-                delay = start + offset - loop.time()
-                if measured and delay <= 0:
-                    continue  # the measurement window already covered this
+
+            offsets, basis = self.verify_schedule
+            ref = detected_at
+            if basis == BASIS_OPEN and clock_ok(open_at, detected_at):
+                ref = open_at
+            now = dt_util.utcnow()
+            targets = [(o, ref + timedelta(seconds=o)) for o in offsets]
+            pending = [t for t in targets if t[1] > now]
+            overdue = [t for t in targets if t[1] <= now]
+            # Points already past (detection was late, or measurement covered
+            # them): one immediate catch-up poll instead of several, none at
+            # all if the measurement window just polled continuously.
+            seq = pending if measured or not overdue else [(overdue[-1][0], now), *pending]
+
+            for offset, target in seq:
+                delay = (target - dt_util.utcnow()).total_seconds()
                 if delay > 0:
                     await asyncio.sleep(delay)
                 await self.async_refresh()
@@ -190,14 +253,16 @@ class SolityStatusCoordinator(DataUpdateCoordinator[dict]):
                 if self.last_poll_ok and self.is_locked:
                     self._record_verify(offset, polls, "locked")
                     return
-            self._record_verify(LOCK_VERIFY_OFFSETS[-1], polls, "still_unlocked")
+            self._record_verify(offsets[-1], polls, "still_unlocked")
         finally:
             # A newer open may have replaced this task; don't clobber it.
             if self._verify_task is asyncio.current_task():
                 self._verify_task = None
                 self.async_update_listeners()
 
-    async def _async_measure(self, start: float, open_at: datetime | None) -> int:
+    async def _async_measure(
+        self, detected_at: datetime, open_at: datetime | None
+    ) -> int:
         """Back-to-back polls; returns -1 if locked, else the polls spent.
 
         The deadbolt is sampled somewhere inside each poll's round trip, so the
@@ -205,11 +270,12 @@ class SolityStatusCoordinator(DataUpdateCoordinator[dict]):
         unlocked and before the END of the first poll that read locked.
         """
         loop = asyncio.get_running_loop()
-        detected_at = dt_util.utcnow()
+        start = loop.time()
         polls = failures = 0
         rtts: list[float] = []
         last_unlocked_start: datetime | None = None
         locked_end: datetime | None = None
+        trusted = clock_ok(open_at, detected_at)
 
         while polls < MEASURE_MAX_POLLS and loop.time() - start < MEASURE_WINDOW_SECONDS:
             t0 = loop.time()
@@ -229,33 +295,61 @@ class SolityStatusCoordinator(DataUpdateCoordinator[dict]):
             if wait > 0:
                 await asyncio.sleep(wait)
 
-        ref = open_at or detected_at
+        ref = open_at if trusted else detected_at
         lo = last_unlocked_start or ref  # nothing seen unlocked -> since open
-        result = "locked" if locked_end else "still_unlocked"
+        after_open_max = _secs(open_at, locked_end) if trusted else None
+        after_detect_max = _secs(detected_at, locked_end)
         self.last_measurement = {
             "open_at": open_at.isoformat() if open_at else None,
+            "lock_clock_ok": trusted,
             "detected_after_open_s": _secs(open_at, detected_at),
-            "locked_after_open_min_s": _secs(ref, lo) if locked_end else None,
-            "locked_after_open_max_s": _secs(ref, locked_end),
-            "locked_after_detect_max_s": _secs(detected_at, locked_end),
+            "locked_after_open_min_s": _secs(ref, lo) if locked_end and trusted else None,
+            "locked_after_open_max_s": after_open_max,
+            "locked_after_detect_max_s": after_detect_max,
             "first_poll_already_locked": bool(locked_end) and last_unlocked_start is None,
-            "result": result,
+            "result": "locked" if locked_end else "still_unlocked",
             "polls": polls,
             "failures": failures,
             "rtt_avg_s": round(sum(rtts) / len(rtts), 2) if rtts else None,
             "rtt_max_s": round(max(rtts), 2) if rtts else None,
         }
         _LOGGER.info("Solity lock measurement: %s", self.last_measurement)
-        self.async_update_listeners()
+
+        # Only entries that relocked inside the window become samples; a door
+        # held open past it would skew the stats.
         if locked_end:
-            self._record_verify(
-                round(loop.time() - start), polls, "locked"
-            )
+            if self.calibration.add_sample(after_open_max, after_detect_max):
+                self._notify_calibrated()
+            self.last_measurement["calibration"] = self.calibration.progress
+            self._record_verify(round(loop.time() - start, 1), polls, "locked")
+            self.async_update_listeners()
             return -1
+        self.last_measurement["calibration"] = self.calibration.progress
+        self.async_update_listeners()
         return polls
 
     @callback
-    def _record_verify(self, seconds: int, polls: int, result: str) -> None:
+    def _notify_calibrated(self) -> None:
+        result = self.calibration.result or {}
+        basis = "실제 열림" if result.get("basis") == BASIS_OPEN else "HA 감지"
+        _LOGGER.info("Solity calibration complete: %s", result)
+        persistent_notification.async_create(
+            self.hass,
+            (
+                f"출입 {result.get('samples')}회를 측정해 잠김 확인 스케줄을 맞췄습니다.\n\n"
+                f"- 첫 확인: **{basis} 후 {result.get('first_verify_s')}초**\n"
+                f"- 잠김 소요 시간: 중앙값 {result.get('p50_s')}초 · "
+                f"75% {result.get('p75_s')}초 · 95% {result.get('p95_s')}초\n"
+                f"- 스케줄: {', '.join(str(x) for x in result.get('schedule', [])[:5])} … 초\n\n"
+                "측정(연속 조회)은 자동으로 꺼졌습니다. 다시 맞추려면 통합 옵션에서 "
+                "'보정 다시 하기'를 선택하세요."
+            ),
+            title="솔리티 도어락 보정 완료",
+            notification_id=f"{DOMAIN}_calibrated_{self.config_entry.entry_id}",
+        )
+
+    @callback
+    def _record_verify(self, seconds: float, polls: int, result: str) -> None:
         self.last_verify_seconds = seconds
         self.last_verify_polls = polls
         self.last_verify_result = result

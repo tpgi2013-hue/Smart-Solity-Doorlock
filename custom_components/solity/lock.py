@@ -73,8 +73,9 @@ class SolityLock(CoordinatorEntity[SolityStatusCoordinator], LockEntity):
             "last_verify_seconds": self.coordinator.last_verify_seconds,
             "last_verify_polls": self.coordinator.last_verify_polls,
             "last_verify_result": self.coordinator.last_verify_result,
-            # Measurement mode only: timing of the latest relock (see README).
-            "measure_mode": self.coordinator.measure_mode,
+            # Calibration: True while entries are still being measured; the
+            # latest measurement's timing (see README / calibration sensor).
+            "calibrating": self.coordinator.calibrating,
             "last_measurement": self.coordinator.last_measurement,
         }
 

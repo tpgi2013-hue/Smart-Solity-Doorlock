@@ -9,15 +9,18 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .api import SolityClient
+from .calibration import SolityCalibration
 from .const import (
+    CONF_AUTO_CALIBRATE,
     CONF_DEVICE_ID,
     CONF_EMAIL,
+    CONF_FIRST_VERIFY_SECONDS,
     CONF_HASHED_PWD,
     CONF_LOG_SECONDS,
-    CONF_MEASURE_MODE,
     CONF_STATUS_MINUTES,
+    DEFAULT_AUTO_CALIBRATE,
+    DEFAULT_FIRST_VERIFY_SECONDS,
     DEFAULT_LOG_SECONDS,
-    DEFAULT_MEASURE_MODE,
     DEFAULT_STATUS_MINUTES,
 )
 from .coordinator import SolityLogCoordinator, SolityStatusCoordinator
@@ -45,10 +48,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: SolityConfigEntry) -> bo
     log_seconds = entry.options.get(CONF_LOG_SECONDS, DEFAULT_LOG_SECONDS)
     status_minutes = entry.options.get(CONF_STATUS_MINUTES, DEFAULT_STATUS_MINUTES)
 
-    measure_mode = entry.options.get(CONF_MEASURE_MODE, DEFAULT_MEASURE_MODE)
+    calibration = SolityCalibration(hass, entry.entry_id)
+    await calibration.async_load()
 
     status = SolityStatusCoordinator(
-        hass, entry, client, device_id, status_minutes, measure_mode
+        hass,
+        entry,
+        client,
+        device_id,
+        status_minutes,
+        calibration,
+        auto_calibrate=entry.options.get(CONF_AUTO_CALIBRATE, DEFAULT_AUTO_CALIBRATE),
+        manual_first=entry.options.get(
+            CONF_FIRST_VERIFY_SECONDS, DEFAULT_FIRST_VERIFY_SECONDS
+        ),
     )
     log = SolityLogCoordinator(hass, entry, client, device_id, log_seconds)
 
@@ -67,6 +80,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: SolityConfigEntry) -> bo
 async def async_unload_entry(hass: HomeAssistant, entry: SolityConfigEntry) -> bool:
     """Unload a config entry."""
     return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+
+
+async def async_remove_entry(hass: HomeAssistant, entry: SolityConfigEntry) -> None:
+    """Drop the stored calibration when the integration is removed."""
+    await SolityCalibration(hass, entry.entry_id).async_remove()
 
 
 async def _async_update_listener(hass: HomeAssistant, entry: SolityConfigEntry) -> None:
