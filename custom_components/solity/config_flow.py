@@ -15,18 +15,23 @@ from homeassistant.core import callback
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .api import SolityAuthError, SolityClient, SolityError, hash_password
+from .calibration import SolityCalibration
 from .const import (
     CONF_DEVICE_ID,
     CONF_EMAIL,
     CONF_HASHED_PWD,
     CONF_NICKNAME,
     CONF_PASSWORD,
+    CONF_AUTO_CALIBRATE,
+    CONF_FIRST_VERIFY_SECONDS,
     CONF_LOG_SECONDS,
-    CONF_MEASURE_MODE,
+    CONF_RECALIBRATE,
     CONF_STATUS_MINUTES,
+    DEFAULT_AUTO_CALIBRATE,
+    DEFAULT_FIRST_VERIFY_SECONDS,
     DEFAULT_LOG_SECONDS,
-    DEFAULT_MEASURE_MODE,
     DEFAULT_STATUS_MINUTES,
+    MAX_FIRST_VERIFY_SECONDS,
     MAX_LOG_SECONDS,
     MAX_STATUS_MINUTES,
     MIN_LOG_SECONDS,
@@ -120,18 +125,29 @@ class SolityConfigFlow(ConfigFlow, domain=DOMAIN):
 
 
 class SolityOptionsFlow(OptionsFlow):
-    """Options: poll intervals."""
+    """Options: poll intervals, auto-calibration, manual first verify."""
 
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         if user_input is not None:
-            return self.async_create_entry(title="", data=user_input)
+            data = dict(user_input)
+            if data.pop(CONF_RECALIBRATE, False):
+                runtime = getattr(self.config_entry, "runtime_data", None)
+                if runtime is not None:
+                    await runtime.status.calibration.async_reset()
+                    runtime.status.async_update_listeners()
+                else:  # entry not loaded: wipe the stored calibration directly
+                    await SolityCalibration(
+                        self.hass, self.config_entry.entry_id
+                    ).async_reset()
+            return self.async_create_entry(title="", data=data)
 
         opts = self.config_entry.options
         log_default = opts.get(CONF_LOG_SECONDS, DEFAULT_LOG_SECONDS)
         status_default = opts.get(CONF_STATUS_MINUTES, DEFAULT_STATUS_MINUTES)
-        measure_default = opts.get(CONF_MEASURE_MODE, DEFAULT_MEASURE_MODE)
+        calibrate_default = opts.get(CONF_AUTO_CALIBRATE, DEFAULT_AUTO_CALIBRATE)
+        first_default = opts.get(CONF_FIRST_VERIFY_SECONDS, DEFAULT_FIRST_VERIFY_SECONDS)
         return self.async_show_form(
             step_id="init",
             data_schema=vol.Schema(
@@ -144,7 +160,14 @@ class SolityOptionsFlow(OptionsFlow):
                         vol.Coerce(int),
                         vol.Range(min=MIN_STATUS_MINUTES, max=MAX_STATUS_MINUTES),
                     ),
-                    vol.Required(CONF_MEASURE_MODE, default=measure_default): bool,
+                    vol.Required(CONF_AUTO_CALIBRATE, default=calibrate_default): bool,
+                    vol.Required(CONF_RECALIBRATE, default=False): bool,
+                    vol.Required(
+                        CONF_FIRST_VERIFY_SECONDS, default=first_default
+                    ): vol.All(
+                        vol.Coerce(float),
+                        vol.Range(min=0, max=MAX_FIRST_VERIFY_SECONDS),
+                    ),
                 }
             ),
         )

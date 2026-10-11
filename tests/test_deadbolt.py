@@ -40,7 +40,7 @@ async def _setup(hass, fake):
     entry = MockConfigEntry(
         domain=DOMAIN,
         data={"email": "a", "hashed_pwd": "b", "device_id": "D", "nickname": "현관"},
-        options={"log_seconds": 10, "status_minutes": 30},
+        options={"log_seconds": 10, "status_minutes": 30, "auto_calibrate": False},
     )
     entry.add_to_hass(hass)
     p = patch.multiple(
@@ -152,88 +152,4 @@ async def test_second_open_restarts_single_verify(hass, freezer):
     calls = fake.status_calls
     freezer.tick(timedelta(seconds=900)); await _tick(hass, 0)
     assert fake.status_calls == calls
-    p.stop()
-
-
-class SlowFake(Fake):
-    """get_status takes ~0.8s (cloud -> module -> lock round trip)."""
-
-    slow = False
-
-    async def get_status(self, _id):
-        import asyncio
-
-        if self.slow:
-            await asyncio.sleep(0.8)
-        return await super().get_status(_id)
-
-
-async def _run(hass, freezer, seconds, step=0.25):
-    for _ in range(int(seconds / step)):
-        freezer.tick(timedelta(seconds=step))
-        await _tick(hass, 0)
-
-
-async def test_measure_mode_times_relock_from_real_open(hass, freezer):
-    fake = SlowFake()
-    entry = MockConfigEntry(
-        domain=DOMAIN,
-        data={"email": "a", "hashed_pwd": "b", "device_id": "D", "nickname": "현관"},
-        options={"log_seconds": 10, "status_minutes": 30, "measure_mode": True},
-    )
-    entry.add_to_hass(hass)
-    p = patch.multiple(
-        "custom_components.solity.api.SolityClient",
-        get_status=lambda self, i: fake.get_status(i),
-        retrieve_log=lambda self, i, length=20: fake.retrieve_log(i),
-        open=AsyncMock(),
-        close=AsyncMock(),
-    )
-    p.start()
-    await hass.config_entries.async_setup(entry.entry_id)
-    await hass.async_block_till_done()
-    fake.slow = True
-    base = fake.status_calls  # setup's first refresh
-    assert hass.states.get(LOCK).attributes["measure_mode"] is True
-
-    # the lock logged the open 4s before HA's log poll picks it up
-    fake.deadbolt = 0
-    now_kst = dt_util.now(dt_util.get_time_zone("Asia/Seoul"))
-    open_at = (now_kst + timedelta(seconds=6)).strftime("%Y-%m-%d %H:%M:%S")
-    fake.logs.insert(0, _log(open_at))
-    await _run(hass, freezer, 10)  # log poll fires -> detection
-    # door held ~3s more, then the motor locks
-    await _run(hass, freezer, 3)
-    fake.deadbolt = 1
-    await _run(hass, freezer, 3)
-
-    m = hass.states.get(LOCK).attributes["last_measurement"]
-    assert m["result"] == "locked"
-    assert m["polls"] >= 3 and fake.status_calls - base == m["polls"]
-    # (the test clock fires timers on 0.25s ticks, so RTT reads ~0.5 here)
-    assert 0 < m["rtt_avg_s"] <= 1.0
-    assert m["first_poll_already_locked"] is False
-    # lock window brackets the real relock and is about two round trips wide
-    assert m["locked_after_open_min_s"] < m["locked_after_open_max_s"]
-    assert m["locked_after_open_max_s"] - m["locked_after_open_min_s"] <= 2.5
-    assert 3 <= m["detected_after_open_s"] <= 5  # log poll lag vs lock clock
-    st = hass.states.get(LOCK)
-    assert st.state == "locked" and st.attributes["verifying"] is False
-    # no further wake-ups after confirmation
-    calls = fake.status_calls
-    await _run(hass, freezer, 60, step=5)
-    assert fake.status_calls == calls
-    p.stop()
-
-
-async def test_measure_mode_off_by_default_uses_schedule(hass, freezer):
-    fake = Fake()
-    _, p = await _setup(hass, fake)
-    assert hass.states.get(LOCK).attributes["last_measurement"] is None
-    fake.logs.insert(0, _log("2026-10-12 07:30:00"))
-    freezer.tick(timedelta(seconds=10)); await _tick(hass, 0)
-    before = fake.status_calls
-    freezer.tick(timedelta(seconds=6)); await _tick(hass, 0)
-    assert fake.status_calls - before == 1
-    assert hass.states.get(LOCK).attributes["last_measurement"] is None
     p.stop()
