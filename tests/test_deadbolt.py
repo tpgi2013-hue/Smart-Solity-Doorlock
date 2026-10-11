@@ -66,7 +66,13 @@ async def test_door_held_open_then_locks(hass, freezer):
     _, p = await _setup(hass, fake)
     assert hass.states.get(LOCK).state == "locked"
     events = []
-    hass.bus.async_listen("state_changed", lambda e: e.data["entity_id"] == EVENT and events.append(e.data["new_state"].attributes["event_type"]))
+
+    def _on_change(e):
+        new = e.data.get("new_state")
+        if e.data["entity_id"] == EVENT and new and "event_type" in new.attributes:
+            events.append(new.attributes["event_type"])
+
+    hass.bus.async_listen("state_changed", _on_change)
 
     # someone opens from inside and holds the door
     fake.deadbolt = 0
