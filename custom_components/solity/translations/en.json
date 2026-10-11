@@ -33,7 +33,7 @@
           "log_seconds": "Event-log poll interval (seconds)",
           "status_minutes": "Status/battery poll interval (minutes)"
         },
-        "description": "Event-log polling (5-600s) reads the cloud log — it does NOT wake the lock, so it can be fast. Status polling (1-1440 min) wakes the lock for battery/deadbolt, so keep it slow. The lock state is the real deadbolt: after every open the lock is re-polled a few times (5s, 10s, 20s, … up to 15 min) until the motor has locked again."
+        "description": "Event-log polling (5-600s) reads the cloud log — it does NOT wake the lock, so it can be fast. Status polling (1-1440 min) wakes the lock for battery/deadbolt, so keep it slow. The lock state is the real deadbolt: after every open the lock is re-polled a few times (3s, 8s, 15s, … up to 15 min) until the motor has locked again."
       }
     }
   },
