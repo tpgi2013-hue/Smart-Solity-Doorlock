@@ -16,21 +16,19 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .api import SolityAuthError, SolityClient, SolityError, hash_password
 from .const import (
-    CONF_AUTO_CLOSE_SECONDS,
     CONF_DEVICE_ID,
     CONF_EMAIL,
     CONF_HASHED_PWD,
     CONF_NICKNAME,
     CONF_PASSWORD,
     CONF_LOG_SECONDS,
+    CONF_MEASURE_MODE,
     CONF_STATUS_MINUTES,
-    DEFAULT_AUTO_CLOSE_SECONDS,
     DEFAULT_LOG_SECONDS,
+    DEFAULT_MEASURE_MODE,
     DEFAULT_STATUS_MINUTES,
-    MAX_AUTO_CLOSE_SECONDS,
     MAX_LOG_SECONDS,
     MAX_STATUS_MINUTES,
-    MIN_AUTO_CLOSE_SECONDS,
     MIN_LOG_SECONDS,
     MIN_STATUS_MINUTES,
     DOMAIN,
@@ -122,7 +120,7 @@ class SolityConfigFlow(ConfigFlow, domain=DOMAIN):
 
 
 class SolityOptionsFlow(OptionsFlow):
-    """Options: poll interval."""
+    """Options: poll intervals."""
 
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
@@ -133,9 +131,7 @@ class SolityOptionsFlow(OptionsFlow):
         opts = self.config_entry.options
         log_default = opts.get(CONF_LOG_SECONDS, DEFAULT_LOG_SECONDS)
         status_default = opts.get(CONF_STATUS_MINUTES, DEFAULT_STATUS_MINUTES)
-        auto_close_default = opts.get(
-            CONF_AUTO_CLOSE_SECONDS, DEFAULT_AUTO_CLOSE_SECONDS
-        )
+        measure_default = opts.get(CONF_MEASURE_MODE, DEFAULT_MEASURE_MODE)
         return self.async_show_form(
             step_id="init",
             data_schema=vol.Schema(
@@ -148,14 +144,7 @@ class SolityOptionsFlow(OptionsFlow):
                         vol.Coerce(int),
                         vol.Range(min=MIN_STATUS_MINUTES, max=MAX_STATUS_MINUTES),
                     ),
-                    vol.Required(
-                        CONF_AUTO_CLOSE_SECONDS, default=auto_close_default
-                    ): vol.All(
-                        vol.Coerce(int),
-                        vol.Range(
-                            min=MIN_AUTO_CLOSE_SECONDS, max=MAX_AUTO_CLOSE_SECONDS
-                        ),
-                    ),
+                    vol.Required(CONF_MEASURE_MODE, default=measure_default): bool,
                 }
             ),
         )
