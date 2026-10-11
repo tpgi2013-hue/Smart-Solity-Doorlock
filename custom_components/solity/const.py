@@ -34,6 +34,17 @@ TOLERATED_STATUS_FAILURES = 3
 # which poll confirmed it so this can be tuned from real history.
 LOCK_VERIFY_OFFSETS = (3, 8, 15, 30, 60, 120, 180, 300, 600, 900)
 
+# Measurement mode (option, default off): after an open, poll get_status
+# back-to-back (next poll as soon as the previous returns) for up to this many
+# seconds to find when the motor actually locks, with round-trip precision.
+# Costs many lock wake-ups per entry — turn on for a day, read the
+# last_measurement attribute history, then turn off and tune the offsets.
+CONF_MEASURE_MODE = "measure_mode"
+DEFAULT_MEASURE_MODE = False
+MEASURE_WINDOW_SECONDS = 30
+MEASURE_MIN_INTERVAL = 0.5  # floor between poll starts (never hammer the API)
+MEASURE_MAX_POLLS = 60
+
 # Attribute values tagging the deadbolt-confirmed close event.
 VERIFIED_CLOSE_METHOD = "deadbolt"
 VERIFIED_CLOSE_LOG_TYPE = "DEADBOLT_STATUS"
@@ -42,8 +53,9 @@ VERIFIED_CLOSE_MESSAGE = "데드볼트 잠김이 확인되었습니다."
 MANUFACTURER = "SOLITY"
 MODEL = "WELKOM"
 
-# Door-lock timezone for the log API (Korea).
+# Door-lock timezone for the log API (Korea). logDateTime is in this zone.
 LOG_TIMEZONE = "+9:00"
+LOG_UTC_OFFSET_HOURS = 9
 
 # Event-log codes (logCode) → event category.
 LOG_CODE_CLOSE = "0"

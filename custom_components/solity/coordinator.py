@@ -3,22 +3,45 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
+from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
 from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+from homeassistant.util import dt as dt_util
 
 from .api import SolityAuthError, SolityClient, SolityError
 from .const import (
     DOMAIN,
     LOCK_VERIFY_OFFSETS,
+    LOG_UTC_OFFSET_HOURS,
+    MEASURE_MAX_POLLS,
+    MEASURE_MIN_INTERVAL,
+    MEASURE_WINDOW_SECONDS,
     OPEN_LOG_CODES,
     TOLERATED_STATUS_FAILURES,
 )
 
 _LOGGER = logging.getLogger(__name__)
+_LOG_TZ = timezone(timedelta(hours=LOG_UTC_OFFSET_HOURS))
+
+
+def parse_log_dt(value: str | None) -> datetime | None:
+    """Parse the lock's logDateTime ('YYYY-MM-DD HH:MM:SS', KST) to aware dt."""
+    if not value:
+        return None
+    try:
+        return datetime.strptime(value, "%Y-%m-%d %H:%M:%S").replace(tzinfo=_LOG_TZ)
+    except ValueError:
+        return None
+
+
+def _secs(a: datetime | None, b: datetime | None) -> float | None:
+    if a is None or b is None:
+        return None
+    return round((b - a).total_seconds(), 1)
 
 
 class SolityStatusCoordinator(DataUpdateCoordinator[dict]):
@@ -37,6 +60,7 @@ class SolityStatusCoordinator(DataUpdateCoordinator[dict]):
         client: SolityClient,
         device_id: str,
         status_minutes: int,
+        measure_mode: bool = False,
     ) -> None:
         super().__init__(
             hass,
@@ -58,6 +82,9 @@ class SolityStatusCoordinator(DataUpdateCoordinator[dict]):
         self.last_verify_seconds: int | None = None
         self.last_verify_polls: int | None = None
         self.last_verify_result: str | None = None  # locked / still_unlocked
+        # Measurement mode: back-to-back polls after an open (see const).
+        self.measure_mode = measure_mode
+        self.last_measurement: dict[str, Any] | None = None
 
     # ------------------------------------------------------------------ poll
     async def _async_update_data(self) -> dict:
@@ -127,23 +154,35 @@ class SolityStatusCoordinator(DataUpdateCoordinator[dict]):
         self.async_set_updated_data(data)
 
     @callback
-    def start_verify(self) -> None:
-        """(Re)start the post-open burst of status polls."""
+    def start_verify(self, open_at: datetime | None = None) -> None:
+        """(Re)start the post-open burst of status polls.
+
+        ``open_at`` is the lock's own timestamp of the open (from the log), used
+        by measurement mode to time the relock from the real open.
+        """
         if self._verify_task is not None and not self._verify_task.done():
             self._verify_task.cancel()
         self._verify_task = self.config_entry.async_create_background_task(
-            self.hass, self._async_verify(), f"{DOMAIN}_verify_lock"
+            self.hass, self._async_verify(open_at), f"{DOMAIN}_verify_lock"
         )
         # Make the lock entity's 'verifying' attribute visible right away.
         self.async_update_listeners()
 
-    async def _async_verify(self) -> None:
+    async def _async_verify(self, open_at: datetime | None = None) -> None:
         loop = asyncio.get_running_loop()
         start = loop.time()
         polls = 0
+        measured = False
         try:
+            if self.measure_mode:
+                polls = await self._async_measure(start, open_at)
+                if polls < 0:  # locked within the measurement window
+                    return
+                measured = True
             for offset in LOCK_VERIFY_OFFSETS:
                 delay = start + offset - loop.time()
+                if measured and delay <= 0:
+                    continue  # the measurement window already covered this
                 if delay > 0:
                     await asyncio.sleep(delay)
                 await self.async_refresh()
@@ -157,6 +196,63 @@ class SolityStatusCoordinator(DataUpdateCoordinator[dict]):
             if self._verify_task is asyncio.current_task():
                 self._verify_task = None
                 self.async_update_listeners()
+
+    async def _async_measure(self, start: float, open_at: datetime | None) -> int:
+        """Back-to-back polls; returns -1 if locked, else the polls spent.
+
+        The deadbolt is sampled somewhere inside each poll's round trip, so the
+        relock happened after the START of the last poll that still read
+        unlocked and before the END of the first poll that read locked.
+        """
+        loop = asyncio.get_running_loop()
+        detected_at = dt_util.utcnow()
+        polls = failures = 0
+        rtts: list[float] = []
+        last_unlocked_start: datetime | None = None
+        locked_end: datetime | None = None
+
+        while polls < MEASURE_MAX_POLLS and loop.time() - start < MEASURE_WINDOW_SECONDS:
+            t0 = loop.time()
+            w0 = dt_util.utcnow()
+            await self.async_refresh()
+            t1 = loop.time()
+            polls += 1
+            if self.last_poll_ok:
+                rtts.append(t1 - t0)
+                if self.is_locked:
+                    locked_end = dt_util.utcnow()
+                    break
+                last_unlocked_start = w0
+            else:
+                failures += 1
+            wait = MEASURE_MIN_INTERVAL - (loop.time() - t0)
+            if wait > 0:
+                await asyncio.sleep(wait)
+
+        ref = open_at or detected_at
+        lo = last_unlocked_start or ref  # nothing seen unlocked -> since open
+        result = "locked" if locked_end else "still_unlocked"
+        self.last_measurement = {
+            "open_at": open_at.isoformat() if open_at else None,
+            "detected_after_open_s": _secs(open_at, detected_at),
+            "locked_after_open_min_s": _secs(ref, lo) if locked_end else None,
+            "locked_after_open_max_s": _secs(ref, locked_end),
+            "locked_after_detect_max_s": _secs(detected_at, locked_end),
+            "first_poll_already_locked": bool(locked_end) and last_unlocked_start is None,
+            "result": result,
+            "polls": polls,
+            "failures": failures,
+            "rtt_avg_s": round(sum(rtts) / len(rtts), 2) if rtts else None,
+            "rtt_max_s": round(max(rtts), 2) if rtts else None,
+        }
+        _LOGGER.info("Solity lock measurement: %s", self.last_measurement)
+        self.async_update_listeners()
+        if locked_end:
+            self._record_verify(
+                round(loop.time() - start), polls, "locked"
+            )
+            return -1
+        return polls
 
     @callback
     def _record_verify(self, seconds: int, polls: int, result: str) -> None:
@@ -186,9 +282,11 @@ class SolityStatusCoordinator(DataUpdateCoordinator[dict]):
                 return
             new = [x for x in logs if (x.get("logDateTime") or "") > self._last_log_dt]
             self._last_log_dt = newest
-            if any(x.get("logCode") in OPEN_LOG_CODES for x in new):
+            opens = [x for x in new if x.get("logCode") in OPEN_LOG_CODES]
+            if opens:
                 self.mark_unlocked()
-                self.start_verify()
+                # newest-first list -> opens[0] is the latest open
+                self.start_verify(parse_log_dt(opens[0].get("logDateTime")))
 
         return log.async_add_listener(_on_log)
 

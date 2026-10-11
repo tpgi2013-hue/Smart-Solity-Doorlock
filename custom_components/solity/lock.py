@@ -14,6 +14,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
+from homeassistant.util import dt as dt_util
 
 from . import SolityConfigEntry
 from .const import CONF_DEVICE_ID, CONF_NICKNAME, DOMAIN, MANUFACTURER, MODEL
@@ -72,6 +73,9 @@ class SolityLock(CoordinatorEntity[SolityStatusCoordinator], LockEntity):
             "last_verify_seconds": self.coordinator.last_verify_seconds,
             "last_verify_polls": self.coordinator.last_verify_polls,
             "last_verify_result": self.coordinator.last_verify_result,
+            # Measurement mode only: timing of the latest relock (see README).
+            "measure_mode": self.coordinator.measure_mode,
+            "last_measurement": self.coordinator.last_measurement,
         }
 
     async def async_lock(self, **kwargs: Any) -> None:
@@ -81,7 +85,7 @@ class SolityLock(CoordinatorEntity[SolityStatusCoordinator], LockEntity):
     async def async_unlock(self, **kwargs: Any) -> None:
         await self.coordinator.client.open(self.coordinator.device_id)
         self.coordinator.mark_unlocked()
-        self.coordinator.start_verify()
+        self.coordinator.start_verify(dt_util.utcnow())
 
     async def async_open(self, **kwargs: Any) -> None:
         await self.async_unlock(**kwargs)

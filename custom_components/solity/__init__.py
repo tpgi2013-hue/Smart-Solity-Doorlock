@@ -14,8 +14,10 @@ from .const import (
     CONF_EMAIL,
     CONF_HASHED_PWD,
     CONF_LOG_SECONDS,
+    CONF_MEASURE_MODE,
     CONF_STATUS_MINUTES,
     DEFAULT_LOG_SECONDS,
+    DEFAULT_MEASURE_MODE,
     DEFAULT_STATUS_MINUTES,
 )
 from .coordinator import SolityLogCoordinator, SolityStatusCoordinator
@@ -43,7 +45,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: SolityConfigEntry) -> bo
     log_seconds = entry.options.get(CONF_LOG_SECONDS, DEFAULT_LOG_SECONDS)
     status_minutes = entry.options.get(CONF_STATUS_MINUTES, DEFAULT_STATUS_MINUTES)
 
-    status = SolityStatusCoordinator(hass, entry, client, device_id, status_minutes)
+    measure_mode = entry.options.get(CONF_MEASURE_MODE, DEFAULT_MEASURE_MODE)
+
+    status = SolityStatusCoordinator(
+        hass, entry, client, device_id, status_minutes, measure_mode
+    )
     log = SolityLogCoordinator(hass, entry, client, device_id, log_seconds)
 
     await status.async_config_entry_first_refresh()

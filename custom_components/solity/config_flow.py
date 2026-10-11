@@ -22,8 +22,10 @@ from .const import (
     CONF_NICKNAME,
     CONF_PASSWORD,
     CONF_LOG_SECONDS,
+    CONF_MEASURE_MODE,
     CONF_STATUS_MINUTES,
     DEFAULT_LOG_SECONDS,
+    DEFAULT_MEASURE_MODE,
     DEFAULT_STATUS_MINUTES,
     MAX_LOG_SECONDS,
     MAX_STATUS_MINUTES,
@@ -129,6 +131,7 @@ class SolityOptionsFlow(OptionsFlow):
         opts = self.config_entry.options
         log_default = opts.get(CONF_LOG_SECONDS, DEFAULT_LOG_SECONDS)
         status_default = opts.get(CONF_STATUS_MINUTES, DEFAULT_STATUS_MINUTES)
+        measure_default = opts.get(CONF_MEASURE_MODE, DEFAULT_MEASURE_MODE)
         return self.async_show_form(
             step_id="init",
             data_schema=vol.Schema(
@@ -141,6 +144,7 @@ class SolityOptionsFlow(OptionsFlow):
                         vol.Coerce(int),
                         vol.Range(min=MIN_STATUS_MINUTES, max=MAX_STATUS_MINUTES),
                     ),
+                    vol.Required(CONF_MEASURE_MODE, default=measure_default): bool,
                 }
             ),
         )
