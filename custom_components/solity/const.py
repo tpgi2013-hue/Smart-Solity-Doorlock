@@ -41,6 +41,14 @@ MEASURE_WINDOW_SECONDS = 30
 MEASURE_MIN_INTERVAL = 0.5  # floor between poll starts (never hammer the API)
 MEASURE_MAX_POLLS = 60
 
+# Right after an open the first get_status often hangs until the HTTP timeout
+# (the WiFi+ module seems busy uploading the event); the next call answers in
+# ~1s. Post-open polls therefore give up after VERIFY_POLL_TIMEOUT and retry
+# immediately (up to VERIFY_POLL_RETRIES extra tries per scheduled check)
+# instead of blocking 15s. Successful polls observed so far took <= 2.3s.
+VERIFY_POLL_TIMEOUT = 2.5
+VERIFY_POLL_RETRIES = 3
+
 # Auto-calibration (option, default on): measure the first CALIBRATION_SAMPLES
 # entries, then derive this home's verify schedule and stop measuring.
 #   first poll  = 75th percentile of relock time (most entries: 1 wake-up)
@@ -53,6 +61,14 @@ CALIBRATION_SAMPLES = 10
 # agrees with HA's; at least this many samples must have a usable timestamp,
 # otherwise the schedule is anchored to HA's detection instead.
 CALIBRATION_MIN_OPEN_BASIS = 8
+# A measured entry whose lock confirmation came after more than this many
+# seconds of failed polls says little about the relock time -> not a sample.
+CALIBRATION_MAX_BLIND_SECONDS = 5.0
+# Bump when the sampling method changes; stored results from an older method
+# are discarded on load so the home is re-measured.
+#   1: v1.6.0-1.6.1 (15s hangs counted into the relock time)
+#   2: v1.6.2 fast-timeout polls, blind-time filter
+CALIBRATION_ALGO = 2
 # Lock clock sanity: detection may lag the logged open by 0..MAX_DETECT_LAG
 # seconds; a logged open more than CLOCK_AHEAD_TOLERANCE in the future (or
 # older than the max lag) means the lock clock is off -> use detection time.
