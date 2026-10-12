@@ -6,26 +6,31 @@ from dataclasses import dataclass
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.storage import Store
 
 from .api import SolityClient
-from .calibration import SolityCalibration
 from .const import (
-    CONF_AUTO_CALIBRATE,
     CONF_DEVICE_ID,
     CONF_EMAIL,
-    CONF_FIRST_VERIFY_SECONDS,
     CONF_HASHED_PWD,
     CONF_LOG_SECONDS,
     CONF_STATUS_MINUTES,
-    DEFAULT_AUTO_CALIBRATE,
-    DEFAULT_FIRST_VERIFY_SECONDS,
     DEFAULT_LOG_SECONDS,
     DEFAULT_STATUS_MINUTES,
+    DOMAIN,
+    LEGACY_CALIBRATION_STORE,
+    LEGACY_OPTION_KEYS,
 )
 from .coordinator import SolityLogCoordinator, SolityStatusCoordinator
 
-PLATFORMS: list[Platform] = [Platform.LOCK, Platform.SENSOR, Platform.EVENT]
+PLATFORMS: list[Platform] = [
+    Platform.LOCK,
+    Platform.SENSOR,
+    Platform.BINARY_SENSOR,
+    Platform.EVENT,
+]
 
 
 @dataclass
@@ -39,8 +44,31 @@ class SolityData:
 type SolityConfigEntry = ConfigEntry[SolityData]
 
 
+async def _async_cleanup_legacy(hass: HomeAssistant, entry: SolityConfigEntry) -> None:
+    """Remove what v1.4-v1.6 left behind (calibration store/sensor, options)."""
+    if any(key in entry.options for key in LEGACY_OPTION_KEYS):
+        hass.config_entries.async_update_entry(
+            entry,
+            options={
+                k: v for k, v in entry.options.items() if k not in LEGACY_OPTION_KEYS
+            },
+        )
+    await Store(
+        hass, 1, f"{DOMAIN}.{LEGACY_CALIBRATION_STORE}.{entry.entry_id}"
+    ).async_remove()
+    ent_reg = er.async_get(hass)
+    old = ent_reg.async_get_entity_id(
+        "sensor", DOMAIN, f"{entry.data[CONF_DEVICE_ID]}_calibration"
+    )
+    if old:
+        ent_reg.async_remove(old)
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: SolityConfigEntry) -> bool:
     """Set up Smart Solity from a config entry."""
+    # Before the update listener is attached, so this does not trigger a reload.
+    await _async_cleanup_legacy(hass, entry)
+
     session = async_get_clientsession(hass)
     client = SolityClient(session, entry.data[CONF_EMAIL], entry.data[CONF_HASHED_PWD])
     device_id = entry.data[CONF_DEVICE_ID]
@@ -48,21 +76,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: SolityConfigEntry) -> bo
     log_seconds = entry.options.get(CONF_LOG_SECONDS, DEFAULT_LOG_SECONDS)
     status_minutes = entry.options.get(CONF_STATUS_MINUTES, DEFAULT_STATUS_MINUTES)
 
-    calibration = SolityCalibration(hass, entry.entry_id)
-    await calibration.async_load()
-
-    status = SolityStatusCoordinator(
-        hass,
-        entry,
-        client,
-        device_id,
-        status_minutes,
-        calibration,
-        auto_calibrate=entry.options.get(CONF_AUTO_CALIBRATE, DEFAULT_AUTO_CALIBRATE),
-        manual_first=entry.options.get(
-            CONF_FIRST_VERIFY_SECONDS, DEFAULT_FIRST_VERIFY_SECONDS
-        ),
-    )
+    status = SolityStatusCoordinator(hass, entry, client, device_id, status_minutes)
     log = SolityLogCoordinator(hass, entry, client, device_id, log_seconds)
 
     await status.async_config_entry_first_refresh()
@@ -80,11 +94,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: SolityConfigEntry) -> bo
 async def async_unload_entry(hass: HomeAssistant, entry: SolityConfigEntry) -> bool:
     """Unload a config entry."""
     return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
-
-
-async def async_remove_entry(hass: HomeAssistant, entry: SolityConfigEntry) -> None:
-    """Drop the stored calibration when the integration is removed."""
-    await SolityCalibration(hass, entry.entry_id).async_remove()
 
 
 async def _async_update_listener(hass: HomeAssistant, entry: SolityConfigEntry) -> None:
