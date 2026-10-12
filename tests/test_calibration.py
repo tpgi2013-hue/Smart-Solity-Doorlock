@@ -1,4 +1,5 @@
 """Auto-calibration: measure 10 entries, derive this home's verify schedule."""
+import asyncio
 from datetime import timedelta
 from unittest.mock import AsyncMock, patch
 
@@ -27,10 +28,14 @@ class Fake:
     def __init__(self):
         self.deadbolt = 1
         self.status_calls = 0
+        self.hang_next = 0  # this many upcoming calls hang (like the real cloud)
         self.logs = [{"logDateTime": "2026-10-12 06:00:00", "logCode": "1"}]
 
     async def get_status(self, _id):
         self.status_calls += 1
+        if self.hang_next:
+            self.hang_next -= 1
+            await asyncio.sleep(15)  # cut short by the fast-poll timeout
         return {"deadBolt": self.deadbolt, "battery": 83}
 
     async def retrieve_log(self, _id, length=20):
@@ -80,12 +85,13 @@ async def _open(hass, freezer, entry, fake, detect_lag, open_offset=0.0):
     await hass.async_block_till_done()
 
 
-def _stored(samples=10, schedule=(6.0, 12.0, 24.0, 48.0), basis="open"):
+def _stored(samples=10, schedule=(6.0, 12.0, 24.0, 48.0), basis="open", algo=2):
     return {
         "version": 1,
         "minor_version": 1,
         "key": storage_key(ENTRY_ID),
         "data": {
+            "algo": algo,
             "samples": [{"after_open": 5.0, "after_detect": 2.0}] * samples,
             "result": {
                 "basis": basis,
@@ -288,4 +294,68 @@ async def test_auto_calibrate_off_uses_default(hass, freezer, auto):
     st = hass.states.get(CAL)
     assert st.state == "default" and st.attributes["schedule_s"][0] == 3
     assert hass.states.get(LOCK).attributes["calibrating"] is False
+    p.stop()
+
+
+async def test_hung_first_poll_is_cut_and_retried(hass, freezer, hass_storage):
+    """Real-world: the first get_status after an open hangs ~15s."""
+    freezer.move_to(START)
+    hass_storage[storage_key(ENTRY_ID)] = _stored(schedule=(6.0, 12.0, 24.0))
+    fake = Fake()
+    entry, p = await _setup(hass, fake)
+    await _open(hass, freezer, entry, fake, detect_lag=4)
+    fake.deadbolt = 1
+    fake.hang_next = 1
+    await _tick(hass, freezer, 6)  # open+10: hung poll at +6 cut at ~+8.5, retried
+    st = hass.states.get(LOCK)
+    assert st.state == "locked" and st.attributes["last_verify_polls"] == 2
+    # the hang must not flip the lock to unavailable
+    assert st.state != "unavailable"
+    p.stop()
+
+
+async def test_measurement_with_hang_stays_precise(hass, freezer):
+    freezer.move_to(START)
+    fake = Fake()
+    entry, p = await _setup(hass, fake)
+    await _open(hass, freezer, entry, fake, detect_lag=4)
+    fake.hang_next = 1  # first measurement poll hangs (as observed)
+    await _tick(hass, freezer, 3)
+    fake.deadbolt = 1
+    await _tick(hass, freezer, 3)
+    m = hass.states.get(LOCK).attributes["last_measurement"]
+    assert m["result"] == "locked" and m["failures"] == 1
+    assert m["blind_s"] <= 3 and m["sample_used"] is True
+    # v1.6.0 would have reported ~20s here (15s hang + detection lag)
+    assert m["locked_after_open_max_s"] <= 9
+    assert hass.states.get(CAL).attributes["samples_collected"] == 1
+    p.stop()
+
+
+async def test_long_blind_gap_is_not_a_sample(hass, freezer):
+    freezer.move_to(START)
+    fake = Fake()
+    entry, p = await _setup(hass, fake)
+    await _open(hass, freezer, entry, fake, detect_lag=4)
+    fake.hang_next = 3  # ~7.5s of failed polls right before the lock reading
+    fake.deadbolt = 1
+    await _tick(hass, freezer, 12)
+    m = hass.states.get(LOCK).attributes["last_measurement"]
+    assert m["result"] == "locked" and m["blind_s"] > 5
+    assert m["sample_used"] is False
+    assert hass.states.get(CAL).attributes["samples_collected"] == 0
+    assert hass.states.get(LOCK).state == "locked"  # still reported correctly
+    p.stop()
+
+
+async def test_old_method_calibration_is_discarded(hass, freezer, hass_storage):
+    freezer.move_to(START)
+    old = _stored(schedule=(25.5, 28.5, 57.0))
+    del old["data"]["algo"]  # stored by v1.6.0/1.6.1
+    hass_storage[storage_key(ENTRY_ID)] = old
+    fake = Fake()
+    _, p = await _setup(hass, fake)
+    st = hass.states.get(CAL)
+    assert st.state == "calibrating" and st.attributes["samples_collected"] == 0
+    assert st.attributes["schedule_s"][0] == 3  # default until re-measured
     p.stop()

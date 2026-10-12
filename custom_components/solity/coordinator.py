@@ -16,6 +16,7 @@ from homeassistant.util import dt as dt_util
 from .api import SolityAuthError, SolityClient, SolityError
 from .calibration import BASIS_DETECT, BASIS_OPEN, SolityCalibration, build_schedule
 from .const import (
+    CALIBRATION_MAX_BLIND_SECONDS,
     CLOCK_AHEAD_TOLERANCE_SECONDS,
     DOMAIN,
     LOCK_VERIFY_OFFSETS,
@@ -26,6 +27,8 @@ from .const import (
     MEASURE_WINDOW_SECONDS,
     OPEN_LOG_CODES,
     TOLERATED_STATUS_FAILURES,
+    VERIFY_POLL_RETRIES,
+    VERIFY_POLL_TIMEOUT,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -107,18 +110,29 @@ class SolityStatusCoordinator(DataUpdateCoordinator[dict]):
         self.auto_calibrate = auto_calibrate
         self.manual_first = float(manual_first or 0)
         self.last_measurement: dict[str, Any] | None = None
+        # True while a post-open poll runs: short timeout, retried by caller.
+        self._fast = False
 
     # ------------------------------------------------------------------ poll
     async def _async_update_data(self) -> dict:
         try:
-            data = await self.client.get_status(self.device_id)
+            if self._fast:
+                async with asyncio.timeout(VERIFY_POLL_TIMEOUT):
+                    data = await self.client.get_status(self.device_id)
+            else:
+                data = await self.client.get_status(self.device_id)
         except SolityAuthError as err:
             self.last_poll_ok = False
             raise ConfigEntryAuthFailed(str(err)) from err
-        except SolityError as err:
+        except (SolityError, TimeoutError) as err:
+            self.last_poll_ok = False
+            if self._fast and self.data:
+                # Post-open poll gave up early; the caller retries right away,
+                # so this must not count toward going 'unavailable'.
+                _LOGGER.debug("Solity fast status poll missed: %r", err)
+                return self.data
             # A sleeping lock / cloud timeout misses a poll. Don't flap the
             # entities to 'unavailable' on the first miss — keep last values.
-            self.last_poll_ok = False
             self._failures += 1
             if self.data and self._failures <= TOLERATED_STATUS_FAILURES:
                 _LOGGER.debug(
@@ -133,6 +147,8 @@ class SolityStatusCoordinator(DataUpdateCoordinator[dict]):
         if not data:
             # HTTP ok but the lock returned no payload (asleep). Same policy.
             self.last_poll_ok = False
+            if self._fast and self.data:
+                return self.data
             self._failures += 1
             if self.data and self._failures <= TOLERATED_STATUS_FAILURES:
                 _LOGGER.debug(
@@ -174,6 +190,14 @@ class SolityStatusCoordinator(DataUpdateCoordinator[dict]):
         data["deadBolt"] = 0
         self.last_poll_ok = False
         self.async_set_updated_data(data)
+
+    async def _async_fast_refresh(self) -> None:
+        """One post-open status poll with the short timeout."""
+        self._fast = True
+        try:
+            await self.async_refresh()
+        finally:
+            self._fast = False
 
     # -------------------------------------------------------------- schedule
     @property
@@ -248,8 +272,12 @@ class SolityStatusCoordinator(DataUpdateCoordinator[dict]):
                 delay = (target - dt_util.utcnow()).total_seconds()
                 if delay > 0:
                     await asyncio.sleep(delay)
-                await self.async_refresh()
-                polls += 1
+                # A missed (timed-out) poll is retried immediately.
+                for _ in range(1 + VERIFY_POLL_RETRIES):
+                    await self._async_fast_refresh()
+                    polls += 1
+                    if self.last_poll_ok:
+                        break
                 if self.last_poll_ok and self.is_locked:
                     self._record_verify(offset, polls, "locked")
                     return
@@ -276,11 +304,14 @@ class SolityStatusCoordinator(DataUpdateCoordinator[dict]):
         last_unlocked_start: datetime | None = None
         locked_end: datetime | None = None
         trusted = clock_ok(open_at, detected_at)
+        # Seconds spent in failed polls since the last good reading: the lock
+        # state is unknown during them, so they blur the relock time.
+        blind = 0.0
 
         while polls < MEASURE_MAX_POLLS and loop.time() - start < MEASURE_WINDOW_SECONDS:
             t0 = loop.time()
             w0 = dt_util.utcnow()
-            await self.async_refresh()
+            await self._async_fast_refresh()
             t1 = loop.time()
             polls += 1
             if self.last_poll_ok:
@@ -289,8 +320,10 @@ class SolityStatusCoordinator(DataUpdateCoordinator[dict]):
                     locked_end = dt_util.utcnow()
                     break
                 last_unlocked_start = w0
+                blind = 0.0
             else:
                 failures += 1
+                blind += t1 - t0
             wait = MEASURE_MIN_INTERVAL - (loop.time() - t0)
             if wait > 0:
                 await asyncio.sleep(wait)
@@ -312,13 +345,17 @@ class SolityStatusCoordinator(DataUpdateCoordinator[dict]):
             "failures": failures,
             "rtt_avg_s": round(sum(rtts) / len(rtts), 2) if rtts else None,
             "rtt_max_s": round(max(rtts), 2) if rtts else None,
+            "blind_s": round(blind, 1),
         }
-        _LOGGER.info("Solity lock measurement: %s", self.last_measurement)
 
-        # Only entries that relocked inside the window become samples; a door
-        # held open past it would skew the stats.
+        # Only entries that relocked inside the window, without a long stretch
+        # of failed polls right before the confirmation, become samples: a
+        # door held open past the window, or a blind gap, would skew the stats.
+        usable = bool(locked_end) and blind <= CALIBRATION_MAX_BLIND_SECONDS
+        self.last_measurement["sample_used"] = usable
+        _LOGGER.info("Solity lock measurement: %s", self.last_measurement)
         if locked_end:
-            if self.calibration.add_sample(after_open_max, after_detect_max):
+            if usable and self.calibration.add_sample(after_open_max, after_detect_max):
                 self._notify_calibrated()
             self.last_measurement["calibration"] = self.calibration.progress
             self._record_verify(round(loop.time() - start, 1), polls, "locked")

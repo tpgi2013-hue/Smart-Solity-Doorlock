@@ -8,6 +8,7 @@ Samples and the result are persisted, so a restart does not lose progress.
 """
 from __future__ import annotations
 
+import logging
 import math
 from typing import Any
 
@@ -16,6 +17,7 @@ from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
 from .const import (
+    CALIBRATION_ALGO,
     CALIBRATION_MIN_OPEN_BASIS,
     CALIBRATION_SAMPLES,
     DOMAIN,
@@ -24,6 +26,8 @@ from .const import (
 )
 
 STORAGE_VERSION = 1
+
+_LOGGER = logging.getLogger(__name__)
 
 BASIS_OPEN = "open"  # seconds after the lock's own logged open time
 BASIS_DETECT = "detect"  # seconds after HA detected the open in the log
@@ -71,6 +75,15 @@ class SolityCalibration:
 
     async def async_load(self) -> None:
         data = await self._store.async_load() or {}
+        if data and data.get("algo") != CALIBRATION_ALGO:
+            # Measured with an older method (e.g. v1.6.0-1.6.1 counted 15s
+            # request hangs as relock time): start over.
+            _LOGGER.info(
+                "Solity calibration from method %s discarded; re-measuring",
+                data.get("algo", 1),
+            )
+            await self.async_reset()
+            return
         self.samples = list(data.get("samples") or [])
         self.result = data.get("result")
 
@@ -123,6 +136,7 @@ class SolityCalibration:
             "p95_s": round(p95, 1),
             "samples": len(values),
             "calibrated_at": dt_util.utcnow().isoformat(),
+            "algo": CALIBRATION_ALGO,
         }
 
     async def async_reset(self) -> None:
@@ -134,7 +148,7 @@ class SolityCalibration:
         await self._store.async_remove()
 
     def _data(self) -> dict[str, Any]:
-        return {"samples": self.samples, "result": self.result}
+        return {"algo": CALIBRATION_ALGO, "samples": self.samples, "result": self.result}
 
     def _save(self) -> None:
         self._store.async_delay_save(self._data, 1)
