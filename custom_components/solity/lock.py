@@ -3,7 +3,7 @@
 The lock state is the REAL deadbolt (motor) state from ``get_status`` — never
 a timer guess. The status coordinator invalidates it to 'unlocked' as soon as
 an open appears in the event log (or is sent from HA) and then re-polls the
-lock in a short backoff burst until the deadbolt reads locked again.
+lock, paced by the door state, until the deadbolt reads locked again.
 """
 from __future__ import annotations
 
@@ -14,7 +14,6 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
-from homeassistant.util import dt as dt_util
 
 from . import SolityConfigEntry
 from .const import CONF_DEVICE_ID, CONF_NICKNAME, DOMAIN, MANUFACTURER, MODEL
@@ -68,15 +67,12 @@ class SolityLock(CoordinatorEntity[SolityStatusCoordinator], LockEntity):
             "verifying": self.coordinator.verifying,
             # False = value is assumed (open seen / poll missed), not read back.
             "confirmed": self.coordinator.last_poll_ok,
-            # Latest post-open verify: seconds after the open was detected and
-            # how many status polls it took (tuning data for the offsets).
+            # Latest post-open check: seconds after the open was detected, how
+            # many status polls it took, and what each poll saw.
             "last_verify_seconds": self.coordinator.last_verify_seconds,
             "last_verify_polls": self.coordinator.last_verify_polls,
             "last_verify_result": self.coordinator.last_verify_result,
-            # Calibration: True while entries are still being measured; the
-            # latest measurement's timing (see README / calibration sensor).
-            "calibrating": self.coordinator.calibrating,
-            "last_measurement": self.coordinator.last_measurement,
+            "last_verify_trace": self.coordinator.last_verify_trace,
         }
 
     async def async_lock(self, **kwargs: Any) -> None:
@@ -86,7 +82,7 @@ class SolityLock(CoordinatorEntity[SolityStatusCoordinator], LockEntity):
     async def async_unlock(self, **kwargs: Any) -> None:
         await self.coordinator.client.open(self.coordinator.device_id)
         self.coordinator.mark_unlocked()
-        self.coordinator.start_verify(dt_util.utcnow())
+        self.coordinator.start_verify()
 
     async def async_open(self, **kwargs: Any) -> None:
         await self.async_unlock(**kwargs)

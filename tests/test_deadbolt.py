@@ -1,7 +1,9 @@
-"""Deadbolt verification: lock state must follow the real motor, not a timer."""
+"""Lock state follows the real deadbolt; post-open checks are paced by the door."""
+import asyncio
 from datetime import timedelta
 from unittest.mock import AsyncMock, patch
 
+from homeassistant.helpers import entity_registry as er
 from homeassistant.util import dt as dt_util
 from pytest_homeassistant_custom_component.common import (
     MockConfigEntry,
@@ -12,7 +14,10 @@ from custom_components.solity.api import SolityError
 from custom_components.solity.const import DOMAIN
 
 LOCK = "lock.hyeongwan"
+DOOR = "binary_sensor.hyeongwan_door"
 EVENT = "event.hyeongwan_door_event"
+ENTRY_ID = "E1"
+START = "2026-10-12 07:00:00+09:00"
 
 
 def _log(dt, code="1"):
@@ -20,27 +25,42 @@ def _log(dt, code="1"):
 
 
 class Fake:
+    """Cloud stand-in: deadbolt (1 = locked) and door (subLatch 1 = closed)."""
+
     def __init__(self):
         self.deadbolt = 1
+        self.door_closed = 1
         self.fail = False
+        self.hang_next = 0  # this many upcoming calls hang (like the real cloud)
         self.status_calls = 0
         self.logs = [_log("2026-10-12 06:00:00")]
 
     async def get_status(self, _id):
         self.status_calls += 1
+        if self.hang_next:
+            self.hang_next -= 1
+            await asyncio.sleep(15)  # cut short by the fast-poll timeout
         if self.fail:
             raise SolityError("timeout")
-        return {"deadBolt": self.deadbolt, "subLatch": self.deadbolt, "battery": 83}
+        return {"deadBolt": self.deadbolt, "subLatch": self.door_closed, "battery": 83}
 
     async def retrieve_log(self, _id, length=20):
         return list(self.logs)
 
+    def opens(self, stamp="2026-10-12 07:05:22"):
+        """Someone unlocks and opens the door."""
+        self.deadbolt = 0
+        self.door_closed = 0
+        self.logs.insert(0, _log(stamp))
 
-async def _setup(hass, fake):
+
+async def _setup(hass, fake, options=None):
     entry = MockConfigEntry(
         domain=DOMAIN,
+        entry_id=ENTRY_ID,
         data={"email": "a", "hashed_pwd": "b", "device_id": "D", "nickname": "현관"},
-        options={"log_seconds": 10, "status_minutes": 30, "auto_calibrate": False},
+        # log poll effectively manual (600s): tests trigger detection themselves
+        options=options or {"log_seconds": 600, "status_minutes": 30},
     )
     entry.add_to_hass(hass)
     p = patch.multiple(
@@ -56,15 +76,43 @@ async def _setup(hass, fake):
     return entry, p
 
 
-async def _tick(hass, sec):
-    async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=sec))
+# NOTE: the HA test harness fires asyncio timers up to ~0.5s early relative to
+# the frozen wall clock, so "not yet" checks stay well before their targets.
+async def _tick(hass, freezer, seconds, step=0.25):
+    for _ in range(round(seconds / step)):
+        freezer.tick(timedelta(seconds=step))
+        async_fire_time_changed(hass, dt_util.utcnow())
+        await hass.async_block_till_done()
+
+
+async def _detect(hass, entry):
+    await entry.runtime_data.log.async_refresh()
     await hass.async_block_till_done()
 
 
-async def test_door_held_open_then_locks(hass, freezer):
+def _results(hass):
+    return [x["result"] for x in hass.states.get(LOCK).attributes["last_verify_trace"]]
+
+
+async def test_quick_entry_one_poll(hass, freezer):
+    freezer.move_to(START)
     fake = Fake()
-    _, p = await _setup(hass, fake)
-    assert hass.states.get(LOCK).state == "locked"
+    entry, p = await _setup(hass, fake)
+    fake.logs.insert(0, _log("2026-10-12 07:00:00"))  # opened, already relocked
+    before = fake.status_calls
+    await _detect(hass, entry)
+    await _tick(hass, freezer, 1)
+    st = hass.states.get(LOCK)
+    assert st.state == "locked" and fake.status_calls - before == 1
+    assert st.attributes["last_verify_result"] == "locked"
+    assert hass.states.get(DOOR).state == "off"  # closed
+    p.stop()
+
+
+async def test_door_held_open_then_closes_and_locks(hass, freezer):
+    freezer.move_to(START)
+    fake = Fake()
+    entry, p = await _setup(hass, fake)
     events = []
 
     def _on_change(e):
@@ -74,82 +122,143 @@ async def test_door_held_open_then_locks(hass, freezer):
 
     hass.bus.async_listen("state_changed", _on_change)
 
-    # someone opens from inside and holds the door
-    fake.deadbolt = 0
-    fake.logs.insert(0, _log("2026-10-12 07:05:22"))
-    freezer.tick(timedelta(seconds=10)); await _tick(hass, 0)
+    fake.opens()
+    await _detect(hass, entry)
+    await _tick(hass, freezer, 0.5)
     assert hass.states.get(LOCK).state == "unlocked"
+    assert hass.states.get(DOOR).state == "on"  # open
     assert events == ["open"]
 
-    # 3s, 8s, 15s, 30s polls: still held open -> must stay unlocked (old bug: locked)
-    for _ in range(3):
-        freezer.tick(timedelta(seconds=10)); await _tick(hass, 0)
-        assert hass.states.get(LOCK).state == "unlocked"
-    assert "close" not in events
+    # door stays open: rechecks back off 5s -> 10s (not every second)
+    calls = fake.status_calls
+    await _tick(hass, freezer, 14)
+    assert fake.status_calls - calls == 2  # at ~5s and ~15s
+    assert hass.states.get(LOCK).state == "unlocked"
 
-    # door closes, motor locks -> next verify poll (60s) confirms
+    # door shuts; auto-lock follows a moment later
+    fake.door_closed = 1
+    await _tick(hass, freezer, 20)  # next check (~+20s from start of backoff)
+    assert _results(hass)[-1] == "closed_unlocked"
+    assert hass.states.get(DOOR).state == "off"
     fake.deadbolt = 1
-    freezer.tick(timedelta(seconds=35)); await _tick(hass, 0)
+    await _tick(hass, freezer, 2)  # closed -> rechecked after 1.5s
     st = hass.states.get(LOCK)
     assert st.state == "locked" and st.attributes["confirmed"] is True
-    assert st.attributes["last_verify_seconds"] == 60
-    assert st.attributes["last_verify_polls"] == 5
+    assert _results(hass)[-2:] == ["closed_unlocked", "locked"]
     assert events == ["open", "close"]
     calls = fake.status_calls
-    # verify burst stopped
-    freezer.tick(timedelta(seconds=600)); await _tick(hass, 0)
-    assert fake.status_calls == calls
+    await _tick(hass, freezer, 600, step=10)
+    assert fake.status_calls == calls  # burst stopped
     p.stop()
 
 
-async def test_missed_poll_does_not_revert_to_stale_locked(hass, freezer):
+async def test_closed_but_never_locks_backs_off(hass, freezer):
+    """Manual-lock mode: door closed, bolt never thrown -> don't hammer it."""
+    freezer.move_to(START)
     fake = Fake()
-    _, p = await _setup(hass, fake)
-    fake.deadbolt = 0
-    fake.fail = True  # lock asleep / cloud timeout during verify
-    fake.logs.insert(0, _log("2026-10-12 07:05:22"))
-    freezer.tick(timedelta(seconds=10)); await _tick(hass, 0)
-    freezer.tick(timedelta(seconds=10)); await _tick(hass, 0)
+    entry, p = await _setup(hass, fake)
+    fake.opens()
+    fake.door_closed = 1  # unlocked but door shut, auto-lock off
+    await _detect(hass, entry)
+    before = fake.status_calls
+    await _tick(hass, freezer, 6)
+    # 3 quick 1.5s rechecks, then backoff
+    assert 3 <= fake.status_calls - before <= 4
+    await _tick(hass, freezer, 900, step=5)
+    st = hass.states.get(LOCK)
+    assert st.state == "unlocked"
+    assert st.attributes["last_verify_result"] == "still_unlocked"
+    assert fake.status_calls - before <= 15  # whole 15-min window
+    p.stop()
+
+
+async def test_hung_first_poll_is_cut_and_retried(hass, freezer):
+    """Real-world: the first get_status after an open hangs ~15s."""
+    freezer.move_to(START)
+    fake = Fake()
+    entry, p = await _setup(hass, fake)
+    fake.logs.insert(0, _log("2026-10-12 07:00:00"))
+    fake.hang_next = 1
+    await _detect(hass, entry)
+    await _tick(hass, freezer, 4)  # cut at 2.5s, retried
+    st = hass.states.get(LOCK)
+    assert st.state == "locked" and st.attributes["last_verify_polls"] == 2
+    assert st.attributes["last_verify_seconds"] <= 4
+    p.stop()
+
+
+async def test_missed_polls_do_not_revert_to_stale_locked(hass, freezer):
+    freezer.move_to(START)
+    fake = Fake()
+    entry, p = await _setup(hass, fake)
+    fake.opens()
+    fake.fail = True  # lock asleep / cloud errors during the checks
+    await _detect(hass, entry)
+    await _tick(hass, freezer, 10)
     st = hass.states.get(LOCK)
     assert st.state == "unlocked" and st.attributes["confirmed"] is False
+    assert st.state != "unavailable"
+    assert hass.states.get(DOOR).state == "unknown"  # not read back yet
+    assert "no_answer" in _results(hass)
     p.stop()
 
 
-async def test_quick_entry_confirms_on_first_poll(hass, freezer):
+async def test_second_open_restarts_single_burst(hass, freezer):
+    freezer.move_to(START)
     fake = Fake()
-    _, p = await _setup(hass, fake)
-    fake.logs.insert(0, _log("2026-10-12 07:10:00"))  # opened and already relocked
-    freezer.tick(timedelta(seconds=10)); await _tick(hass, 0)
-    before = fake.status_calls
-    freezer.tick(timedelta(seconds=6)); await _tick(hass, 0)
-    st = hass.states.get(LOCK)
-    assert st.state == "locked"
-    assert fake.status_calls - before == 1
-    assert st.attributes["last_verify_seconds"] == 3
-    assert st.attributes["last_verify_polls"] == 1
-    assert st.attributes["last_verify_result"] == "locked"
-    assert st.attributes["verifying"] is False
-    p.stop()
-
-
-async def test_second_open_restarts_single_verify(hass, freezer):
-    fake = Fake()
-    _, p = await _setup(hass, fake)
-    fake.deadbolt = 0
-    fake.logs.insert(0, _log("2026-10-12 07:20:00"))
-    freezer.tick(timedelta(seconds=10)); await _tick(hass, 0)
+    entry, p = await _setup(hass, fake)
+    fake.opens("2026-10-12 07:20:00")
+    await _detect(hass, entry)
+    await _tick(hass, freezer, 2)
     assert hass.states.get(LOCK).attributes["verifying"] is True
-    # another open while the first burst is still running
-    fake.logs.insert(0, _log("2026-10-12 07:20:12"))
-    freezer.tick(timedelta(seconds=10)); await _tick(hass, 0)
-    st = hass.states.get(LOCK)
-    assert st.state == "unlocked" and st.attributes["verifying"] is True
-    # exactly one burst keeps running: lock -> confirmed once, then quiet
+    fake.opens("2026-10-12 07:20:12")  # another open mid-burst
+    await _detect(hass, entry)
+    await _tick(hass, freezer, 1)
+    fake.door_closed = 1
     fake.deadbolt = 1
-    freezer.tick(timedelta(seconds=4)); await _tick(hass, 0)
+    await _tick(hass, freezer, 6)
     st = hass.states.get(LOCK)
     assert st.state == "locked" and st.attributes["verifying"] is False
     calls = fake.status_calls
-    freezer.tick(timedelta(seconds=900)); await _tick(hass, 0)
-    assert fake.status_calls == calls
+    await _tick(hass, freezer, 900, step=10)
+    assert fake.status_calls == calls  # exactly one burst was running
+    p.stop()
+
+
+async def test_upgrade_cleans_up_calibration_leftovers(hass, freezer, hass_storage):
+    freezer.move_to(START)
+    key = f"{DOMAIN}.calibration.{ENTRY_ID}"
+    hass_storage[key] = {"version": 1, "key": key, "data": {"algo": 2, "samples": []}}
+    ent_reg = er.async_get(hass)
+    ent_reg.async_get_or_create("sensor", DOMAIN, "D_calibration")
+    fake = Fake()
+    entry, p = await _setup(
+        hass,
+        fake,
+        options={
+            "log_seconds": 600,
+            "status_minutes": 30,
+            "auto_calibrate": True,
+            "first_verify_seconds": 0,
+            "measure_mode": False,
+        },
+    )
+    assert dict(entry.options) == {"log_seconds": 600, "status_minutes": 30}
+    assert ent_reg.async_get_entity_id("sensor", DOMAIN, "D_calibration") is None
+    await hass.async_block_till_done()
+    assert key not in hass_storage
+    assert hass.states.get(LOCK).state == "locked"
+    p.stop()
+
+
+async def test_options_flow_only_poll_intervals(hass, freezer):
+    freezer.move_to(START)
+    fake = Fake()
+    entry, p = await _setup(hass, fake)
+    flow = await hass.config_entries.options.async_init(entry.entry_id)
+    assert set(flow["data_schema"].schema) == {"log_seconds", "status_minutes"}
+    result = await hass.config_entries.options.async_configure(
+        flow["flow_id"], {"log_seconds": 10, "status_minutes": 30}
+    )
+    assert result["type"] == "create_entry"
     p.stop()
