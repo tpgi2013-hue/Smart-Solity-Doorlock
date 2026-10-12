@@ -1,4 +1,4 @@
-"""Sensor platform for Smart Solity (battery, last access, calibration)."""
+"""Sensor platform for Smart Solity (battery + last access)."""
 from __future__ import annotations
 
 from typing import Any
@@ -15,22 +15,8 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from . import SolityConfigEntry
-from .const import (
-    CALIBRATION_SAMPLES,
-    CONF_DEVICE_ID,
-    CONF_NICKNAME,
-    DOMAIN,
-    MANUFACTURER,
-    MODEL,
-)
-from .coordinator import (
-    SOURCE_CALIBRATED,
-    SOURCE_CALIBRATING,
-    SOURCE_DEFAULT,
-    SOURCE_MANUAL,
-    SolityLogCoordinator,
-    SolityStatusCoordinator,
-)
+from .const import CONF_DEVICE_ID, CONF_NICKNAME, DOMAIN, MANUFACTURER, MODEL
+from .coordinator import SolityLogCoordinator, SolityStatusCoordinator
 
 
 async def async_setup_entry(
@@ -44,7 +30,6 @@ async def async_setup_entry(
         [
             SolityBatterySensor(data.status, entry),
             SolityLastAccessSensor(data.log, entry),
-            SolityCalibrationSensor(data.status, entry),
         ]
     )
 
@@ -120,41 +105,4 @@ class SolityLastAccessSensor(CoordinatorEntity[SolityLogCoordinator], SensorEnti
             "log_type": entry.get("logType"),
             "log_code": entry.get("logCode"),
             "message": entry.get("logMessage"),
-        }
-
-
-class SolityCalibrationSensor(CoordinatorEntity[SolityStatusCoordinator], SensorEntity):
-    """Where this home's post-open verify schedule comes from, and what it is."""
-
-    _attr_has_entity_name = True
-    _attr_translation_key = "calibration"
-    _attr_device_class = SensorDeviceClass.ENUM
-    _attr_options = [SOURCE_CALIBRATING, SOURCE_CALIBRATED, SOURCE_MANUAL, SOURCE_DEFAULT]
-    _attr_entity_category = EntityCategory.DIAGNOSTIC
-    _attr_icon = "mdi:timer-cog-outline"
-
-    def __init__(self, coordinator: SolityStatusCoordinator, entry: SolityConfigEntry) -> None:
-        super().__init__(coordinator)
-        self._attr_unique_id = f"{entry.data[CONF_DEVICE_ID]}_calibration"
-        self._attr_device_info = _device_info(entry)
-
-    @property
-    def native_value(self) -> str:
-        return self.coordinator.schedule_source
-
-    @property
-    def extra_state_attributes(self) -> dict[str, Any]:
-        cal = self.coordinator.calibration
-        offsets, basis = self.coordinator.verify_schedule
-        result = cal.result or {}
-        return {
-            "samples_collected": len(cal.samples),
-            "samples_needed": CALIBRATION_SAMPLES,
-            "schedule_s": list(offsets),
-            "basis": basis,
-            "first_verify_s": offsets[0],
-            "p50_s": result.get("p50_s"),
-            "p75_s": result.get("p75_s"),
-            "p95_s": result.get("p95_s"),
-            "calibrated_at": result.get("calibrated_at"),
         }

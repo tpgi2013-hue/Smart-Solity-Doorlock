@@ -31,12 +31,9 @@
         "title": "Smart Solity options",
         "data": {
           "log_seconds": "Event-log poll interval (seconds)",
-          "status_minutes": "Status/battery poll interval (minutes)",
-          "auto_calibrate": "Auto-calibrate the lock check to this home",
-          "recalibrate": "Recalibrate (discard the measured result and measure again)",
-          "first_verify_seconds": "First lock check, seconds after the real open (0 = automatic)"
+          "status_minutes": "Status/battery poll interval (minutes)"
         },
-        "description": "Event-log polling (5-600s) reads the cloud log and does not wake the lock. Status polling (1-1440 min) wakes the lock, so keep it slow. The lock state is the real deadbolt: after every open the lock is checked again until the motor has locked. With auto-calibration the first 10 entries are measured with back-to-back checks (extra battery for those entries only), then the check times are set from this home's measured relock times and measuring stops. A manual first-check time overrides the automatic one."
+        "description": "Event-log polling (5–600s) reads the cloud log and does not wake the lock. Status polling (1–1440 min) wakes the lock, so keep it slow. After every open the lock is checked until the deadbolt is out again, paced by the door state the lock reports (closed: recheck in 1.5s, open: back off)."
       }
     }
   },
@@ -47,15 +44,11 @@
       },
       "last_access": {
         "name": "Last access"
-      },
-      "calibration": {
-        "name": "Lock check calibration",
-        "state": {
-          "calibrating": "Calibrating",
-          "calibrated": "Calibrated",
-          "manual": "Manual",
-          "default": "Default"
-        }
+      }
+    },
+    "binary_sensor": {
+      "door": {
+        "name": "Door"
       }
     },
     "event": {
