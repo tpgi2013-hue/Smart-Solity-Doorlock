@@ -13,6 +13,7 @@ from homeassistant.helpers.storage import Store
 
 from .api import SolityClient
 from .const import (
+    CONF_API_DEVICE_ID,
     CONF_DEVICE_ID,
     CONF_EMAIL,
     CONF_HASHED_PWD,
@@ -78,7 +79,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: SolityConfigEntry) -> bo
 
     session = async_get_clientsession(hass)
     client = SolityClient(session, entry.data[CONF_EMAIL], entry.data[CONF_HASHED_PWD])
-    device_id = entry.data[CONF_DEVICE_ID]
+    # Entities are keyed on CONF_DEVICE_ID; API calls use the id the current
+    # account knows the lock by (differs after switching to another account).
+    device_id = entry.data.get(CONF_API_DEVICE_ID) or entry.data[CONF_DEVICE_ID]
 
     # Fresh start (e.g. after switching accounts): forget an old warning.
     ir.async_delete_issue(hass, DOMAIN, _issue_id(entry))

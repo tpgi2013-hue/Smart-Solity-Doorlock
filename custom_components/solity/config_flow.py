@@ -1,6 +1,7 @@
 """Config flow for Smart Solity."""
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 import voluptuous as vol
@@ -16,6 +17,7 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .api import SolityAuthError, SolityClient, SolityError, hash_password
 from .const import (
+    CONF_API_DEVICE_ID,
     CONF_DEVICE_ID,
     CONF_EMAIL,
     CONF_HASHED_PWD,
@@ -31,6 +33,8 @@ from .const import (
     MIN_STATUS_MINUTES,
     DOMAIN,
 )
+
+_LOGGER = logging.getLogger(__name__)
 
 USER_SCHEMA = vol.Schema(
     {
@@ -116,7 +120,9 @@ class SolityConfigFlow(ConfigFlow, domain=DOMAIN):
     ) -> ConfigFlowResult:
         """Switch the account (e.g. to an invited member account for HA).
 
-        The door lock stays the same, so entities and their IDs are kept.
+        The door lock stays the same, so entities and their IDs are kept. A
+        member account may know the lock under another id; then that id is
+        stored for API calls only (CONF_API_DEVICE_ID).
         """
         entry = self._get_reconfigure_entry()
         errors: dict[str, str] = {}
@@ -132,14 +138,24 @@ class SolityConfigFlow(ConfigFlow, domain=DOMAIN):
             except SolityError:
                 errors["base"] = "cannot_connect"
             else:
-                ids = {d.get("myDeviceId") for d in devices}
-                if entry.data[CONF_DEVICE_ID] not in ids:
+                self._email, self._hashed, self._devices = email, hashed, devices
+                ids = [d.get("myDeviceId") for d in devices]
+                _LOGGER.info(
+                    "Smart Solity reconfigure: account has %s lock(s): %s",
+                    len(devices),
+                    [
+                        (d.get("myDeviceId"), d.get("myDeviceNickName"), d.get("_list"))
+                        for d in devices
+                    ],
+                )
+                if entry.data[CONF_DEVICE_ID] in ids:
+                    return self._finish_reconfigure(None)
+                if not devices:
                     errors["base"] = "device_not_shared"
+                elif len(devices) == 1:
+                    return self._finish_reconfigure(ids[0])
                 else:
-                    return self.async_update_reload_and_abort(
-                        entry,
-                        data_updates={CONF_EMAIL: email, CONF_HASHED_PWD: hashed},
-                    )
+                    return await self.async_step_reconfigure_device()
 
         return self.async_show_form(
             step_id="reconfigure",
@@ -147,6 +163,35 @@ class SolityConfigFlow(ConfigFlow, domain=DOMAIN):
                 USER_SCHEMA, {CONF_EMAIL: entry.data.get(CONF_EMAIL)}
             ),
             errors=errors,
+        )
+
+    async def async_step_reconfigure_device(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """The new account has several locks under other ids: pick this one."""
+        if user_input is not None:
+            return self._finish_reconfigure(user_input[CONF_DEVICE_ID])
+        options = {
+            d.get("myDeviceId"): (d.get("myDeviceNickName") or d.get("myDeviceId"))
+            for d in self._devices
+        }
+        return self.async_show_form(
+            step_id="reconfigure_device",
+            data_schema=vol.Schema({vol.Required(CONF_DEVICE_ID): vol.In(options)}),
+        )
+
+    @callback
+    def _finish_reconfigure(self, api_device_id: str | None) -> ConfigFlowResult:
+        entry = self._get_reconfigure_entry()
+        if api_device_id == entry.data[CONF_DEVICE_ID]:
+            api_device_id = None
+        return self.async_update_reload_and_abort(
+            entry,
+            data_updates={
+                CONF_EMAIL: self._email,
+                CONF_HASHED_PWD: self._hashed,
+                CONF_API_DEVICE_ID: api_device_id,
+            },
         )
 
     @staticmethod
