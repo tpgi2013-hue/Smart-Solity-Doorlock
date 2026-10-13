@@ -6,6 +6,10 @@ CONF_EMAIL = "email"
 CONF_PASSWORD = "password"
 CONF_HASHED_PWD = "hashed_pwd"
 CONF_DEVICE_ID = "device_id"
+# The id to use in API calls when the account was switched (reconfigure) and
+# the new account knows the same lock under another id. CONF_DEVICE_ID stays
+# as it was because entity unique_ids are built from it.
+CONF_API_DEVICE_ID = "api_device_id"
 CONF_NICKNAME = "nickname"
 
 # Event-log poll (fast, seconds) — detects external open/close/fingerprint.

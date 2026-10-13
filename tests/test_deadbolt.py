@@ -32,10 +32,12 @@ class Fake:
         self.fail = False
         self.hang_next = 0  # this many upcoming calls hang (like the real cloud)
         self.status_calls = 0
+        self.ids: set[str] = set()  # device ids the integration asked for
         self.logs = [_log("2026-10-12 06:00:00")]
 
     async def get_status(self, _id):
         self.status_calls += 1
+        self.ids.add(_id)
         if self.hang_next:
             self.hang_next -= 1
             await asyncio.sleep(15)  # cut short by the fast-poll timeout
@@ -44,6 +46,7 @@ class Fake:
         return {"deadBolt": self.deadbolt, "subLatch": self.door_closed, "battery": 83}
 
     async def retrieve_log(self, _id, length=20):
+        self.ids.add(_id)
         return list(self.logs)
 
     def opens(self, stamp="2026-10-12 07:05:22"):

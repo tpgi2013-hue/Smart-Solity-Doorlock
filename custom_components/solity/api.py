@@ -152,9 +152,33 @@ class SolityClient:
             raise SolityError("bad response body") from err
 
     async def get_devices(self) -> list[dict]:
-        """Return the list of door locks on this account."""
+        """Return the door locks on this account, owned or shared.
+
+        Owned locks come in ``myDeviceList``; locks shared with a member
+        account may come in another list, so every list of device-like dicts
+        under ``contents`` is collected.
+        """
         data = await self._authed("GET", "/api_v2/myDevice")
-        return ((data.get("contents") or {}).get("myDeviceList")) or []
+        contents = data.get("contents") or {}
+        devices: list[dict] = []
+        seen: set[str] = set()
+        for key, value in contents.items():
+            if not isinstance(value, list):
+                continue
+            for item in value:
+                if not isinstance(item, dict) or not item.get("myDeviceId"):
+                    continue
+                if item["myDeviceId"] in seen:
+                    continue
+                seen.add(item["myDeviceId"])
+                devices.append({**item, "_list": key})
+        if not devices:
+            _LOGGER.warning(
+                "Smart Solity: no door lock found on this account; response "
+                "contents keys: %s",
+                {k: type(v).__name__ for k, v in contents.items()},
+            )
+        return devices
 
     async def control(self, device_id: str, control_type: str, option: str = "1") -> dict:
         """Send a control command (open / close / get_status / ...)."""

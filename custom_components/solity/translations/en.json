@@ -22,13 +22,20 @@
           "email": "Email / ID",
           "password": "Password"
         }
+      },
+      "reconfigure_device": {
+        "title": "Select door lock",
+        "description": "This account has several door locks. Pick the one this entry controls (its entities are kept).",
+        "data": {
+          "device_id": "Door lock"
+        }
       }
     },
     "error": {
       "invalid_auth": "Invalid ID or password.",
       "cannot_connect": "Cannot connect to the Smart Solity server.",
       "no_devices": "No door locks found on this account.",
-      "device_not_shared": "This account does not have this door lock. Invite it as a member from the owner's app first."
+      "device_not_shared": "No door lock was found on this account. Invite it as a member from the owner's app (and accept the invite) first."
     },
     "abort": {
       "already_configured": "This door lock is already configured.",

@@ -186,11 +186,88 @@ async def test_reconfigure_switches_account_keeps_entities(hass, freezer):
     p.stop()
 
 
-async def test_reconfigure_rejects_account_without_the_lock(hass, freezer):
+async def test_reconfigure_rejects_account_without_any_lock(hass, freezer):
     freezer.move_to(START)
     fake = Fake()
     entry, p = await _setup(hass, fake)
-    result = await _reconfigure(hass, entry, [{"myDeviceId": "OTHER"}])
+    result = await _reconfigure(hass, entry, [])
     assert result["errors"] == {"base": "device_not_shared"}
     assert entry.data["email"] == "a"
     p.stop()
+
+
+async def test_reconfigure_member_account_knows_lock_by_other_id(hass, freezer):
+    """v1.7.2 field case: invited member account lists the lock as 'M1'."""
+    freezer.move_to(START)
+    fake = Fake()
+    entry, p = await _setup(hass, fake)
+    result = await _reconfigure(
+        hass, entry, [{"myDeviceId": "M1", "myDeviceNickName": "현관"}]
+    )
+    assert result["reason"] == "reconfigure_successful"
+    assert entry.data["device_id"] == "D"  # entities keep their ids
+    assert entry.data["api_device_id"] == "M1"
+    await hass.async_block_till_done()
+    fake.ids.clear()
+    await entry.runtime_data.status.async_refresh()
+    await entry.runtime_data.log.async_refresh()
+    assert fake.ids == {"M1"}  # API calls use the member account's id
+    assert hass.states.get(LOCK).state == "locked"
+    p.stop()
+
+
+async def test_reconfigure_back_to_same_id_clears_api_id(hass, freezer):
+    freezer.move_to(START)
+    fake = Fake()
+    entry, p = await _setup(hass, fake)
+    await _reconfigure(hass, entry, [{"myDeviceId": "M1"}])
+    await hass.async_block_till_done()
+    await _reconfigure(hass, entry, [{"myDeviceId": "D"}])
+    await hass.async_block_till_done()
+    assert entry.data["api_device_id"] is None
+    fake.ids.clear()
+    await entry.runtime_data.status.async_refresh()
+    assert fake.ids == {"D"}
+    p.stop()
+
+
+async def test_reconfigure_several_locks_asks_which(hass, freezer):
+    freezer.move_to(START)
+    fake = Fake()
+    entry, p = await _setup(hass, fake)
+    devices = [
+        {"myDeviceId": "M1", "myDeviceNickName": "현관"},
+        {"myDeviceId": "M2", "myDeviceNickName": "창고"},
+    ]
+    with patch.multiple(
+        "custom_components.solity.config_flow.SolityClient",
+        login=AsyncMock(),
+        get_devices=AsyncMock(return_value=devices),
+    ):
+        flow = await hass.config_entries.flow.async_init(
+            DOMAIN,
+            context={"source": SOURCE_RECONFIGURE, "entry_id": entry.entry_id},
+        )
+        result = await hass.config_entries.flow.async_configure(
+            flow["flow_id"], {"email": "ha", "password": "pw"}
+        )
+        assert result["step_id"] == "reconfigure_device"
+        result = await hass.config_entries.flow.async_configure(
+            flow["flow_id"], {"device_id": "M1"}
+        )
+    assert result["reason"] == "reconfigure_successful"
+    assert entry.data["api_device_id"] == "M1"
+    p.stop()
+
+
+async def test_get_devices_includes_shared_list():
+    client = SolityClient(None, "a", "b")
+    client._token = "t"
+    body = (
+        '{"contents": {"myDeviceList": [], '
+        '"shareDeviceList": [{"myDeviceId": "M1", "myDeviceNickName": "현관"}], '
+        '"count": 1}}'
+    )
+    with patch.object(client, "_raw", AsyncMock(return_value=(200, body))):
+        devices = await client.get_devices()
+    assert [d["myDeviceId"] for d in devices] == ["M1"]
