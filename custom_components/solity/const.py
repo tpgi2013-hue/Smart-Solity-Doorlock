@@ -91,3 +91,10 @@ LOG_TIMEZONE = "+9:00"
 LOG_CODE_OPEN = "1"
 LOG_CODE_OPEN_LONG = "7"
 OPEN_LOG_CODES = (LOG_CODE_OPEN, LOG_CODE_OPEN_LONG)
+
+# How a logged open was made (mediaType), seen in the field:
+#   1 code, 5 card, 7 remote (app / HA), 8 fingerprint, 11 smart open,
+#   32 inside handle
+# A remote open does not mean someone is at the door, so the door is not
+# assumed open for it.
+LOG_MEDIA_REMOTE = "7"

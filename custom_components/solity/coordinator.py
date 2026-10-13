@@ -14,6 +14,7 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 from .api import SolityAuthError, SolityClient, SolityError
 from .const import (
     DOMAIN,
+    LOG_MEDIA_REMOTE,
     OPEN_LOG_CODES,
     RECOVER_DELAYS,
     TOLERATED_STATUS_FAILURES,
@@ -347,9 +348,19 @@ class SolityStatusCoordinator(DataUpdateCoordinator[dict]):
                 return
             new = [x for x in logs if (x.get("logDateTime") or "") > self._last_log_dt]
             self._last_log_dt = newest
-            if any(x.get("logCode") in OPEN_LOG_CODES for x in new):
-                self.mark_unlocked(assume_open=True)
-                self.start_verify()
+            opens = [x for x in new if x.get("logCode") in OPEN_LOG_CODES]
+            if not opens:
+                return
+            if all(str(x.get("mediaType")) == LOG_MEDIA_REMOTE for x in opens):
+                # Remote open (app / HA): nobody need be at the door. When HA
+                # sent it, the check is already running and has read the real
+                # door; don't overwrite that with a guess.
+                if not self.verifying:
+                    self.mark_unlocked()
+                    self.start_verify()
+                return
+            self.mark_unlocked(assume_open=True)
+            self.start_verify()
 
         return log.async_add_listener(_on_log)
 
