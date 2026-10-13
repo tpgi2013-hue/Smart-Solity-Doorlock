@@ -15,6 +15,7 @@ from .api import SolityAuthError, SolityClient, SolityError
 from .const import (
     DOMAIN,
     OPEN_LOG_CODES,
+    RECOVER_DELAYS,
     TOLERATED_STATUS_FAILURES,
     VERIFY_BACKOFF_MAX,
     VERIFY_CLOSED_FAST_TRIES,
@@ -70,6 +71,8 @@ class SolityStatusCoordinator(DataUpdateCoordinator[dict]):
         # kept-over value after a missed poll).
         self.last_poll_ok = False
         self._verify_task: asyncio.Task | None = None
+        # Slow re-polls while the lock doesn't answer at all.
+        self._recover_task: asyncio.Task | None = None
         self._last_log_dt: str | None = None
         # Outcome of the latest post-open burst (diagnostics).
         self.last_verify_seconds: float | None = None
@@ -100,6 +103,7 @@ class SolityStatusCoordinator(DataUpdateCoordinator[dict]):
             # A sleeping lock / cloud timeout misses a poll. Don't flap the
             # entities to 'unavailable' on the first miss — keep last values.
             self._failures += 1
+            self._schedule_recover()
             if self.data and self._failures <= TOLERATED_STATUS_FAILURES:
                 _LOGGER.debug(
                     "Solity status miss %s/%s, keeping last data: %s",
@@ -116,6 +120,7 @@ class SolityStatusCoordinator(DataUpdateCoordinator[dict]):
             if self._fast and self.data:
                 return self.data
             self._failures += 1
+            self._schedule_recover()
             if self.data and self._failures <= TOLERATED_STATUS_FAILURES:
                 _LOGGER.debug(
                     "Solity status empty %s/%s, keeping last data",
@@ -154,6 +159,10 @@ class SolityStatusCoordinator(DataUpdateCoordinator[dict]):
     def verifying(self) -> bool:
         return self._verify_task is not None and not self._verify_task.done()
 
+    @property
+    def recovering(self) -> bool:
+        return self._recover_task is not None and not self._recover_task.done()
+
     @callback
     def mark_unlocked(self) -> None:
         """An open happened: drop the cached 'locked' so it can't come back.
@@ -173,6 +182,10 @@ class SolityStatusCoordinator(DataUpdateCoordinator[dict]):
         """(Re)start the post-open burst of status polls."""
         if self._verify_task is not None and not self._verify_task.done():
             self._verify_task.cancel()
+        if self.recovering:
+            # The verify burst polls faster; it reschedules recovery if needed.
+            self._recover_task.cancel()
+            self._recover_task = None
         self._verify_task = self.config_entry.async_create_background_task(
             self.hass, self._async_verify(), f"{DOMAIN}_verify_lock"
         )
@@ -230,14 +243,54 @@ class SolityStatusCoordinator(DataUpdateCoordinator[dict]):
                 if loop.time() - start + wait > VERIFY_WINDOW:
                     break
                 await asyncio.sleep(wait)
+            answered = any(x["result"] != "no_answer" for x in trace)
             self._record_verify(
-                round(loop.time() - start, 1), polls, "still_unlocked", trace
+                round(loop.time() - start, 1),
+                polls,
+                "still_unlocked" if answered else "no_answer",
+                trace,
             )
         finally:
             # A newer open may have replaced this task; don't clobber it.
             if self._verify_task is asyncio.current_task():
                 self._verify_task = None
+                if not self.last_poll_ok:
+                    self._schedule_recover()
                 self.async_update_listeners()
+
+    # --------------------------------------------------------------- recover
+    @callback
+    def _schedule_recover(self) -> None:
+        """Lock not answering: re-poll slowly until it does (not every hour)."""
+        if self.recovering or self.verifying or self.data is None:
+            # No data yet = still setting up; HA's setup retry covers that.
+            return
+        self._recover_task = self.config_entry.async_create_background_task(
+            self.hass, self._async_recover(), f"{DOMAIN}_recover_lock"
+        )
+
+    async def _async_recover(self) -> None:
+        attempt = 0
+        _LOGGER.warning(
+            "Solity lock is not answering status requests; retrying every %s-%ss "
+            "until it does (if it lasts, restart the lock: take a battery out)",
+            RECOVER_DELAYS[0],
+            RECOVER_DELAYS[-1],
+        )
+        while True:
+            await asyncio.sleep(RECOVER_DELAYS[min(attempt, len(RECOVER_DELAYS) - 1)])
+            attempt += 1
+            await self.async_refresh()
+            if self.last_poll_ok:
+                break
+        _LOGGER.info("Solity lock answers again (after %s retries)", attempt)
+        if self._recover_task is asyncio.current_task():
+            self._recover_task = None
+        if self.is_locked is False:
+            # Back after an outage and not locked: watch it relock as usual.
+            self.start_verify()
+        else:
+            self.async_update_listeners()
 
     @callback
     def _record_verify(
