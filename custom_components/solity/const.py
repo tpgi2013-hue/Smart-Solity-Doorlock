@@ -54,6 +54,11 @@ VERIFY_TRACE_LEN = 15
 VERIFY_POLL_TIMEOUT = 2.5
 VERIFY_POLL_RETRIES = 3
 
+# When the lock stops answering (WiFi module stuck/offline, seen in the field),
+# don't wait for the next regular status poll (up to hours): re-poll after
+# these delays, staying at the last one, until it answers again.
+RECOVER_DELAYS = (60, 120, 300)
+
 # Leftovers from v1.6.x auto-calibration, cleaned up on setup.
 LEGACY_OPTION_KEYS = (
     "auto_calibrate",
@@ -63,11 +68,14 @@ LEGACY_OPTION_KEYS = (
     "auto_close_seconds",
 )
 LEGACY_CALIBRATION_STORE = "calibration"
+# Entities removed in later versions: (platform, unique_id suffix).
+LEGACY_ENTITIES = (
+    ("sensor", "calibration"),  # v1.7.0
+    ("event", "door_event"),  # v1.7.1: covered by the lock + door sensor
+)
 
-# Attribute values tagging the deadbolt-confirmed close event.
-VERIFIED_CLOSE_METHOD = "deadbolt"
-VERIFIED_CLOSE_LOG_TYPE = "DEADBOLT_STATUS"
-VERIFIED_CLOSE_MESSAGE = "데드볼트 잠김이 확인되었습니다."
+# Repair issue raised when the phone app (same account) kicks HA's session.
+ISSUE_SESSION_TAKEN = "session_taken"
 
 MANUFACTURER = "SOLITY"
 MODEL = "WELKOM"
@@ -75,13 +83,7 @@ MODEL = "WELKOM"
 # Door-lock timezone for the log API (Korea).
 LOG_TIMEZONE = "+9:00"
 
-# Event-log codes (logCode) → event category.
-LOG_CODE_CLOSE = "0"
+# Event-log codes (logCode) that mean the door was opened.
 LOG_CODE_OPEN = "1"
 LOG_CODE_OPEN_LONG = "7"
 OPEN_LOG_CODES = (LOG_CODE_OPEN, LOG_CODE_OPEN_LONG)
-
-EVENT_OPEN = "open"
-EVENT_CLOSE = "close"
-EVENT_OTHER = "other"
-EVENT_TYPES = [EVENT_OPEN, EVENT_CLOSE, EVENT_OTHER]
