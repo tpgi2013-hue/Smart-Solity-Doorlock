@@ -81,6 +81,9 @@ class SolityStatusCoordinator(DataUpdateCoordinator[dict]):
         self.last_verify_trace: list[dict[str, Any]] = []
         # True while a post-open poll runs: short timeout, retried by caller.
         self._fast = False
+        # True while the door state is assumed 'open' after an open in the
+        # log, until the lock is read back (or doesn't answer).
+        self._door_assumed = False
 
     # ------------------------------------------------------------------ poll
     async def _async_update_data(self) -> dict:
@@ -132,6 +135,7 @@ class SolityStatusCoordinator(DataUpdateCoordinator[dict]):
 
         self._failures = 0
         self.last_poll_ok = True
+        self._door_assumed = False
         return data
 
     async def _async_fast_refresh(self) -> None:
@@ -164,17 +168,32 @@ class SolityStatusCoordinator(DataUpdateCoordinator[dict]):
         return self._recover_task is not None and not self._recover_task.done()
 
     @callback
-    def mark_unlocked(self) -> None:
+    def mark_unlocked(self, assume_open: bool = False) -> None:
         """An open happened: drop the cached 'locked' so it can't come back.
 
-        The door state is unknown until the next real reading (an unlock does
-        not always mean the door was opened), so it is cleared too.
+        ``assume_open`` (an open from the lock's own log: fingerprint, card,
+        code, inside handle ...) shows the door as open right away; the first
+        status check corrects it. Otherwise (a remote unlock from HA, which
+        need not open the door) the door is unknown until read back.
         """
         data = dict(self.data or {})
         data["deadBolt"] = 0
-        data.pop("subLatch", None)
+        if assume_open:
+            data["subLatch"] = 0
+        else:
+            data.pop("subLatch", None)
+        self._door_assumed = assume_open
         self.last_poll_ok = False
         self.async_set_updated_data(data)
+
+    @callback
+    def _drop_assumed_door(self) -> None:
+        """The lock didn't answer: don't keep showing a guessed 'open'."""
+        if self._door_assumed and self.data:
+            self._door_assumed = False
+            data = dict(self.data)
+            data.pop("subLatch", None)
+            self.data = data
 
     # ---------------------------------------------------------------- verify
     @callback
@@ -213,6 +232,7 @@ class SolityStatusCoordinator(DataUpdateCoordinator[dict]):
 
                 if not self.last_poll_ok:
                     trace.append({"t": elapsed, "result": "no_answer"})
+                    self._drop_assumed_door()
                     wait = VERIFY_UNKNOWN_RECHECK
                 elif self.is_locked:
                     trace.append({"t": elapsed, "result": "locked"})
@@ -328,7 +348,7 @@ class SolityStatusCoordinator(DataUpdateCoordinator[dict]):
             new = [x for x in logs if (x.get("logDateTime") or "") > self._last_log_dt]
             self._last_log_dt = newest
             if any(x.get("logCode") in OPEN_LOG_CODES for x in new):
-                self.mark_unlocked()
+                self.mark_unlocked(assume_open=True)
                 self.start_verify()
 
         return log.async_add_listener(_on_log)
