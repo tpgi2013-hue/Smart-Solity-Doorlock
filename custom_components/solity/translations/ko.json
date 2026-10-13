@@ -22,13 +22,20 @@
           "email": "이메일 / 아이디",
           "password": "비밀번호"
         }
+      },
+      "reconfigure_device": {
+        "title": "도어락 선택",
+        "description": "이 계정에 도어락이 여러 개 있습니다. 이 연동이 제어할 도어락을 고르세요(엔티티는 그대로 유지됩니다).",
+        "data": {
+          "device_id": "도어락"
+        }
       }
     },
     "error": {
       "invalid_auth": "아이디 또는 비밀번호가 올바르지 않습니다.",
       "cannot_connect": "스마트 솔리티 서버에 연결할 수 없습니다.",
       "no_devices": "이 계정에 등록된 도어락이 없습니다.",
-      "device_not_shared": "이 계정에는 이 도어락이 없습니다. 먼저 소유자 앱에서 구성원으로 초대하세요."
+      "device_not_shared": "이 계정에서 도어락을 찾지 못했습니다. 먼저 소유자 앱에서 구성원으로 초대하고, 새 계정에서 초대를 수락하세요."
     },
     "abort": {
       "already_configured": "이미 설정된 도어락입니다.",
