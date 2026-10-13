@@ -5,8 +5,9 @@ from dataclasses import dataclass
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.storage import Store
 
@@ -20,7 +21,9 @@ from .const import (
     DEFAULT_LOG_SECONDS,
     DEFAULT_STATUS_MINUTES,
     DOMAIN,
+    ISSUE_SESSION_TAKEN,
     LEGACY_CALIBRATION_STORE,
+    LEGACY_ENTITIES,
     LEGACY_OPTION_KEYS,
 )
 from .coordinator import SolityLogCoordinator, SolityStatusCoordinator
@@ -29,7 +32,6 @@ PLATFORMS: list[Platform] = [
     Platform.LOCK,
     Platform.SENSOR,
     Platform.BINARY_SENSOR,
-    Platform.EVENT,
 ]
 
 
@@ -45,7 +47,7 @@ type SolityConfigEntry = ConfigEntry[SolityData]
 
 
 async def _async_cleanup_legacy(hass: HomeAssistant, entry: SolityConfigEntry) -> None:
-    """Remove what v1.4-v1.6 left behind (calibration store/sensor, options)."""
+    """Remove what older versions left behind (options, store, entities)."""
     if any(key in entry.options for key in LEGACY_OPTION_KEYS):
         hass.config_entries.async_update_entry(
             entry,
@@ -57,11 +59,16 @@ async def _async_cleanup_legacy(hass: HomeAssistant, entry: SolityConfigEntry) -
         hass, 1, f"{DOMAIN}.{LEGACY_CALIBRATION_STORE}.{entry.entry_id}"
     ).async_remove()
     ent_reg = er.async_get(hass)
-    old = ent_reg.async_get_entity_id(
-        "sensor", DOMAIN, f"{entry.data[CONF_DEVICE_ID]}_calibration"
-    )
-    if old:
-        ent_reg.async_remove(old)
+    for platform, suffix in LEGACY_ENTITIES:
+        old = ent_reg.async_get_entity_id(
+            platform, DOMAIN, f"{entry.data[CONF_DEVICE_ID]}_{suffix}"
+        )
+        if old:
+            ent_reg.async_remove(old)
+
+
+def _issue_id(entry: SolityConfigEntry) -> str:
+    return f"{ISSUE_SESSION_TAKEN}_{entry.entry_id}"
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: SolityConfigEntry) -> bool:
@@ -72,6 +79,24 @@ async def async_setup_entry(hass: HomeAssistant, entry: SolityConfigEntry) -> bo
     session = async_get_clientsession(hass)
     client = SolityClient(session, entry.data[CONF_EMAIL], entry.data[CONF_HASHED_PWD])
     device_id = entry.data[CONF_DEVICE_ID]
+
+    # Fresh start (e.g. after switching accounts): forget an old warning.
+    ir.async_delete_issue(hass, DOMAIN, _issue_id(entry))
+
+    @callback
+    def _session_taken() -> None:
+        """The app logged in with this account and kicked HA out (and v.v.)."""
+        ir.async_create_issue(
+            hass,
+            DOMAIN,
+            _issue_id(entry),
+            is_fixable=False,
+            severity=ir.IssueSeverity.WARNING,
+            translation_key=ISSUE_SESSION_TAKEN,
+            translation_placeholders={"email": entry.data[CONF_EMAIL]},
+        )
+
+    client.on_session_taken = _session_taken
 
     log_seconds = entry.options.get(CONF_LOG_SECONDS, DEFAULT_LOG_SECONDS)
     status_minutes = entry.options.get(CONF_STATUS_MINUTES, DEFAULT_STATUS_MINUTES)
