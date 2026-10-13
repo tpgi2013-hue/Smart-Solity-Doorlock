@@ -271,3 +271,47 @@ async def test_get_devices_includes_shared_list():
     with patch.object(client, "_raw", AsyncMock(return_value=(200, body))):
         devices = await client.get_devices()
     assert [d["myDeviceId"] for d in devices] == ["M1"]
+
+
+async def test_logged_open_shows_door_open_right_away(hass, freezer):
+    """v1.7.3: an open from the lock's log is shown as door open at once."""
+    freezer.move_to(START)
+    fake = Fake()
+    entry, p = await _setup(hass, fake)
+    fake.logs.insert(0, {"logDateTime": "2026-10-12 07:00:00", "logCode": "1"})
+    fake.hang_next = 1  # first read is slow, like the real lock
+    await _detect(hass, entry)
+    st = hass.states.get(DOOR)
+    assert st.state == "on" and st.attributes["confirmed"] is False
+    await _tick(hass, freezer, 4)  # read back: already shut and locked
+    assert hass.states.get(DOOR).state == "off"
+    assert hass.states.get(LOCK).state == "locked"
+    p.stop()
+
+
+async def test_assumed_open_dropped_when_lock_does_not_answer(hass, freezer):
+    freezer.move_to(START)
+    fake = Fake()
+    entry, p = await _setup(hass, fake)
+    fake.opens()
+    fake.hang_next = 4  # the first check (4 tries x 2.5s) gets no answer
+    await _detect(hass, entry)
+    assert hass.states.get(DOOR).state == "on"
+    await _tick(hass, freezer, 8.5)  # 4 tries cut at 2.5s each (harness runs early)
+    assert hass.states.get(DOOR).state == "unknown"  # no stale guess
+    await _tick(hass, freezer, 3)  # next check answers: door really open
+    st = hass.states.get(DOOR)
+    assert st.state == "on" and st.attributes["confirmed"] is True
+    p.stop()
+
+
+async def test_remote_unlock_from_ha_keeps_door_unknown(hass, freezer):
+    """A remote unlock need not open the door: don't guess."""
+    freezer.move_to(START)
+    fake = Fake()
+    entry, p = await _setup(hass, fake)
+    fake.hang_next = 1
+    await hass.services.async_call("lock", "unlock", {"entity_id": LOCK}, blocking=True)
+    await hass.async_block_till_done()
+    assert hass.states.get(DOOR).state == "unknown"
+    p.stop()
