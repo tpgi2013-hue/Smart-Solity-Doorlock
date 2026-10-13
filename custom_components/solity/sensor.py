@@ -1,4 +1,4 @@
-"""Sensor platform for Smart Solity (battery + last access)."""
+"""Sensor platform for Smart Solity (battery + last unlock)."""
 from __future__ import annotations
 
 from typing import Any
@@ -66,7 +66,10 @@ class SolityBatterySensor(CoordinatorEntity[SolityStatusCoordinator], SensorEnti
 
 
 class SolityLastAccessSensor(CoordinatorEntity[SolityLogCoordinator], SensorEntity):
-    """Most recent access-log entry (who / how / when)."""
+    """Most recent open from the lock's log (who / how / when).
+
+    The lock only logs opens, so this is the last unlock, not entries/exits.
+    """
 
     _attr_has_entity_name = True
     _attr_translation_key = "last_access"

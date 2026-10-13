@@ -8,5 +8,5 @@
   "iot_class": "cloud_polling",
   "issue_tracker": "https://github.com/tpgi2013-hue/Smart-Solity-Doorlock/issues",
   "requirements": [],
-  "version": "1.7.0"
+  "version": "1.7.1"
 }

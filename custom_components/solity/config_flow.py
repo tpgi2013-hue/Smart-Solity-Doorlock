@@ -111,6 +111,44 @@ class SolityConfigFlow(ConfigFlow, domain=DOMAIN):
             },
         )
 
+    async def async_step_reconfigure(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Switch the account (e.g. to an invited member account for HA).
+
+        The door lock stays the same, so entities and their IDs are kept.
+        """
+        entry = self._get_reconfigure_entry()
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            email = user_input[CONF_EMAIL]
+            hashed = hash_password(user_input[CONF_PASSWORD])
+            client = SolityClient(async_get_clientsession(self.hass), email, hashed)
+            try:
+                await client.login()
+                devices = await client.get_devices()
+            except SolityAuthError:
+                errors["base"] = "invalid_auth"
+            except SolityError:
+                errors["base"] = "cannot_connect"
+            else:
+                ids = {d.get("myDeviceId") for d in devices}
+                if entry.data[CONF_DEVICE_ID] not in ids:
+                    errors["base"] = "device_not_shared"
+                else:
+                    return self.async_update_reload_and_abort(
+                        entry,
+                        data_updates={CONF_EMAIL: email, CONF_HASHED_PWD: hashed},
+                    )
+
+        return self.async_show_form(
+            step_id="reconfigure",
+            data_schema=self.add_suggested_values_to_schema(
+                USER_SCHEMA, {CONF_EMAIL: entry.data.get(CONF_EMAIL)}
+            ),
+            errors=errors,
+        )
+
     @staticmethod
     @callback
     def async_get_options_flow(config_entry: ConfigEntry) -> OptionsFlow:

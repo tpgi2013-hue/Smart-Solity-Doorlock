@@ -11,11 +11,13 @@ from typing import Any
 
 from homeassistant.components.lock import LockEntity, LockEntityFeature
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from . import SolityConfigEntry
+from .api import SolityError
 from .const import CONF_DEVICE_ID, CONF_NICKNAME, DOMAIN, MANUFACTURER, MODEL
 from .coordinator import SolityStatusCoordinator
 
@@ -65,6 +67,8 @@ class SolityLock(CoordinatorEntity[SolityStatusCoordinator], LockEntity):
             "fingerprint_count": data.get("fingerPrintCount"),
             # True while post-open status polls are still waiting for the bolt.
             "verifying": self.coordinator.verifying,
+            # True while the lock doesn't answer at all and is re-polled slowly.
+            "not_answering": self.coordinator.recovering,
             # False = value is assumed (open seen / poll missed), not read back.
             "confirmed": self.coordinator.last_poll_ok,
             # Latest post-open check: seconds after the open was detected, how
@@ -75,12 +79,24 @@ class SolityLock(CoordinatorEntity[SolityStatusCoordinator], LockEntity):
             "last_verify_trace": self.coordinator.last_verify_trace,
         }
 
+    async def _command(self, action: str) -> None:
+        client = self.coordinator.client
+        send = client.close if action == "lock" else client.open
+        try:
+            await send(self.coordinator.device_id)
+        except SolityError as err:
+            raise HomeAssistantError(
+                translation_domain=DOMAIN,
+                translation_key=f"{action}_failed",
+                translation_placeholders={"error": str(err)},
+            ) from err
+
     async def async_lock(self, **kwargs: Any) -> None:
-        await self.coordinator.client.close(self.coordinator.device_id)
+        await self._command("lock")
         self.coordinator.start_verify()
 
     async def async_unlock(self, **kwargs: Any) -> None:
-        await self.coordinator.client.open(self.coordinator.device_id)
+        await self._command("unlock")
         self.coordinator.mark_unlocked()
         self.coordinator.start_verify()
 

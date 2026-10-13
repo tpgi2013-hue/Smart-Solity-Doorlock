@@ -15,7 +15,6 @@ from custom_components.solity.const import DOMAIN
 
 LOCK = "lock.hyeongwan"
 DOOR = "binary_sensor.hyeongwan_door"
-EVENT = "event.hyeongwan_door_event"
 ENTRY_ID = "E1"
 START = "2026-10-12 07:00:00+09:00"
 
@@ -113,21 +112,12 @@ async def test_door_held_open_then_closes_and_locks(hass, freezer):
     freezer.move_to(START)
     fake = Fake()
     entry, p = await _setup(hass, fake)
-    events = []
-
-    def _on_change(e):
-        new = e.data.get("new_state")
-        if e.data["entity_id"] == EVENT and new and "event_type" in new.attributes:
-            events.append(new.attributes["event_type"])
-
-    hass.bus.async_listen("state_changed", _on_change)
 
     fake.opens()
     await _detect(hass, entry)
     await _tick(hass, freezer, 0.5)
     assert hass.states.get(LOCK).state == "unlocked"
     assert hass.states.get(DOOR).state == "on"  # open
-    assert events == ["open"]
 
     # door stays open: rechecks back off 5s -> 10s (not every second)
     calls = fake.status_calls
@@ -145,7 +135,6 @@ async def test_door_held_open_then_closes_and_locks(hass, freezer):
     st = hass.states.get(LOCK)
     assert st.state == "locked" and st.attributes["confirmed"] is True
     assert _results(hass)[-2:] == ["closed_unlocked", "locked"]
-    assert events == ["open", "close"]
     calls = fake.status_calls
     await _tick(hass, freezer, 600, step=10)
     assert fake.status_calls == calls  # burst stopped
@@ -231,6 +220,7 @@ async def test_upgrade_cleans_up_calibration_leftovers(hass, freezer, hass_stora
     hass_storage[key] = {"version": 1, "key": key, "data": {"algo": 2, "samples": []}}
     ent_reg = er.async_get(hass)
     ent_reg.async_get_or_create("sensor", DOMAIN, "D_calibration")
+    ent_reg.async_get_or_create("event", DOMAIN, "D_door_event")
     fake = Fake()
     entry, p = await _setup(
         hass,
@@ -245,6 +235,7 @@ async def test_upgrade_cleans_up_calibration_leftovers(hass, freezer, hass_stora
     )
     assert dict(entry.options) == {"log_seconds": 600, "status_minutes": 30}
     assert ent_reg.async_get_entity_id("sensor", DOMAIN, "D_calibration") is None
+    assert ent_reg.async_get_entity_id("event", DOMAIN, "D_door_event") is None
     await hass.async_block_till_done()
     assert key not in hass_storage
     assert hass.states.get(LOCK).state == "locked"
