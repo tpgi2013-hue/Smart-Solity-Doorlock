@@ -14,15 +14,25 @@
         "data": {
           "device_id": "Door lock"
         }
+      },
+      "reconfigure": {
+        "title": "Change account",
+        "description": "Log in with another Smart Solity account that has this door lock (e.g. a member account invited from the app, used only by Home Assistant). Entities are kept.",
+        "data": {
+          "email": "Email / ID",
+          "password": "Password"
+        }
       }
     },
     "error": {
       "invalid_auth": "Invalid ID or password.",
       "cannot_connect": "Cannot connect to the Smart Solity server.",
-      "no_devices": "No door locks found on this account."
+      "no_devices": "No door locks found on this account.",
+      "device_not_shared": "This account does not have this door lock. Invite it as a member from the owner's app first."
     },
     "abort": {
-      "already_configured": "This door lock is already configured."
+      "already_configured": "This door lock is already configured.",
+      "reconfigure_successful": "Account changed."
     }
   },
   "options": {
@@ -43,18 +53,27 @@
         "name": "Battery"
       },
       "last_access": {
-        "name": "Last access"
+        "name": "Last unlock"
       }
     },
     "binary_sensor": {
       "door": {
         "name": "Door"
       }
+    }
+  },
+  "exceptions": {
+    "lock_failed": {
+      "message": "Could not lock the door: {error}"
     },
-    "event": {
-      "door_event": {
-        "name": "Door event"
-      }
+    "unlock_failed": {
+      "message": "Could not unlock the door: {error}"
+    }
+  },
+  "issues": {
+    "session_taken": {
+      "title": "Smart Solity account is also used by the app",
+      "description": "The Smart Solity server allows only one login per account. Home Assistant and the phone app using {email} keep logging each other out. Create a second account, invite it as a member from the owner's app, then switch Home Assistant to it: Settings → Devices & services → Smart Solity → ⋮ → Reconfigure."
     }
   }
 }

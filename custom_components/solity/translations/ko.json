@@ -14,15 +14,25 @@
         "data": {
           "device_id": "도어락"
         }
+      },
+      "reconfigure": {
+        "title": "계정 변경",
+        "description": "이 도어락이 공유된 다른 스마트 솔리티 계정으로 로그인합니다(예: 앱에서 구성원으로 초대한 HA 전용 계정). 엔티티는 그대로 유지됩니다.",
+        "data": {
+          "email": "이메일 / 아이디",
+          "password": "비밀번호"
+        }
       }
     },
     "error": {
       "invalid_auth": "아이디 또는 비밀번호가 올바르지 않습니다.",
       "cannot_connect": "스마트 솔리티 서버에 연결할 수 없습니다.",
-      "no_devices": "이 계정에 등록된 도어락이 없습니다."
+      "no_devices": "이 계정에 등록된 도어락이 없습니다.",
+      "device_not_shared": "이 계정에는 이 도어락이 없습니다. 먼저 소유자 앱에서 구성원으로 초대하세요."
     },
     "abort": {
-      "already_configured": "이미 설정된 도어락입니다."
+      "already_configured": "이미 설정된 도어락입니다.",
+      "reconfigure_successful": "계정이 변경되었습니다."
     }
   },
   "options": {
@@ -43,18 +53,27 @@
         "name": "배터리"
       },
       "last_access": {
-        "name": "마지막 출입"
+        "name": "마지막 열림"
       }
     },
     "binary_sensor": {
       "door": {
         "name": "문"
       }
+    }
+  },
+  "exceptions": {
+    "lock_failed": {
+      "message": "문을 잠그지 못했습니다: {error}"
     },
-    "event": {
-      "door_event": {
-        "name": "도어 이벤트"
-      }
+    "unlock_failed": {
+      "message": "문을 열지 못했습니다: {error}"
+    }
+  },
+  "issues": {
+    "session_taken": {
+      "title": "스마트 솔리티 계정을 앱과 같이 쓰고 있음",
+      "description": "스마트 솔리티 서버는 계정당 한 곳에서만 로그인됩니다. {email} 계정을 HA와 휴대폰 앱이 같이 써서 서로 로그아웃시키고 있습니다. 계정을 하나 더 만들어 소유자 앱에서 구성원으로 초대한 뒤, HA를 그 계정으로 바꾸세요: 설정 → 기기 및 서비스 → Smart Solity → ⋮ → 재구성."
     }
   }
 }
