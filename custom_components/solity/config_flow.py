@@ -185,14 +185,21 @@ class SolityConfigFlow(ConfigFlow, domain=DOMAIN):
         entry = self._get_reconfigure_entry()
         if api_device_id == entry.data[CONF_DEVICE_ID]:
             api_device_id = None
-        return self.async_update_reload_and_abort(
+        # The entry's update listener reloads it when the data changes (HA
+        # 2026.12 drops async_update_reload_and_abort for entries that have
+        # one). Same account and lock again: reload anyway for a fresh login.
+        changed = self.hass.config_entries.async_update_entry(
             entry,
-            data_updates={
+            data={
+                **entry.data,
                 CONF_EMAIL: self._email,
                 CONF_HASHED_PWD: self._hashed,
                 CONF_API_DEVICE_ID: api_device_id,
             },
         )
+        if not changed:
+            self.hass.config_entries.async_schedule_reload(entry.entry_id)
+        return self.async_abort(reason="reconfigure_successful")
 
     @staticmethod
     @callback

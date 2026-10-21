@@ -18,6 +18,7 @@ from .const import (
     OPEN_LOG_CODES,
     RECOVER_DELAYS,
     TOLERATED_STATUS_FAILURES,
+    UNLOCK_GRACE,
     VERIFY_BACKOFF_MAX,
     VERIFY_CLOSED_FAST_TRIES,
     VERIFY_CLOSED_RECHECK,
@@ -85,6 +86,11 @@ class SolityStatusCoordinator(DataUpdateCoordinator[dict]):
         # True while the door state is assumed 'open' after an open in the
         # log, until the lock is read back (or doesn't answer).
         self._door_assumed = False
+        # Loop time until which a 'locked' reading after an HA unlock is stale.
+        self._grace_until: float | None = None
+        # True when the latest reading was such a stale 'locked' (shown as
+        # unlocked; the check reads the lock again shortly).
+        self._stale_locked = False
 
     # ------------------------------------------------------------------ poll
     async def _async_update_data(self) -> dict:
@@ -118,8 +124,10 @@ class SolityStatusCoordinator(DataUpdateCoordinator[dict]):
                 return self.data
             raise UpdateFailed(str(err)) from err
 
-        if not data:
-            # HTTP ok but the lock returned no payload (asleep). Same policy.
+        if not isinstance(data, dict) or _as_int(data.get("deadBolt")) is None:
+            # HTTP ok but no usable status ({} from a sleeping lock, or a
+            # payload without the bolt). Same policy as a miss, and never
+            # replace good data with it.
             self.last_poll_ok = False
             if self._fast and self.data:
                 return self.data
@@ -127,16 +135,27 @@ class SolityStatusCoordinator(DataUpdateCoordinator[dict]):
             self._schedule_recover()
             if self.data and self._failures <= TOLERATED_STATUS_FAILURES:
                 _LOGGER.debug(
-                    "Solity status empty %s/%s, keeping last data",
+                    "Solity status empty %s/%s, keeping last data: %r",
                     self._failures,
                     TOLERATED_STATUS_FAILURES,
+                    data,
                 )
                 return self.data
-            return data
+            raise UpdateFailed("the lock returned no status")
 
         self._failures = 0
         self.last_poll_ok = True
         self._door_assumed = False
+        self._stale_locked = False
+        if self._grace_until is not None:
+            if _as_int(data.get("deadBolt")) == 1 and (
+                asyncio.get_running_loop().time() < self._grace_until
+            ):
+                # Read before the unlock took effect: not a relock.
+                self._stale_locked = True
+                data = {**data, "deadBolt": 0}
+            else:
+                self._grace_until = None
         return data
 
     async def _async_fast_refresh(self) -> None:
@@ -161,6 +180,11 @@ class SolityStatusCoordinator(DataUpdateCoordinator[dict]):
         return None if value is None else value == 0
 
     @property
+    def confirmed(self) -> bool:
+        """The shown lock state was read back from the lock as is."""
+        return self.last_poll_ok and not self._stale_locked
+
+    @property
     def verifying(self) -> bool:
         return self._verify_task is not None and not self._verify_task.done()
 
@@ -169,14 +193,18 @@ class SolityStatusCoordinator(DataUpdateCoordinator[dict]):
         return self._recover_task is not None and not self._recover_task.done()
 
     @callback
-    def mark_unlocked(self, assume_open: bool = False) -> None:
+    def mark_unlocked(self, assume_open: bool = False, from_ha: bool = False) -> None:
         """An open happened: drop the cached 'locked' so it can't come back.
 
         ``assume_open`` (an open from the lock's own log: fingerprint, card,
         code, inside handle ...) shows the door as open right away; the first
         status check corrects it. Otherwise (a remote unlock from HA, which
         need not open the door) the door is unknown until read back.
+        ``from_ha``: HA just sent the unlock, so a 'locked' reading in the
+        next UNLOCK_GRACE seconds is stale, not a relock.
         """
+        if from_ha:
+            self._grace_until = asyncio.get_running_loop().time() + UNLOCK_GRACE
         data = dict(self.data or {})
         data["deadBolt"] = 0
         if assume_open:
@@ -186,6 +214,12 @@ class SolityStatusCoordinator(DataUpdateCoordinator[dict]):
         self._door_assumed = assume_open
         self.last_poll_ok = False
         self.async_set_updated_data(data)
+
+    @callback
+    def cancel_unlock_grace(self) -> None:
+        """HA sent a lock command: a 'locked' reading is real again."""
+        self._grace_until = None
+        self._stale_locked = False
 
     @callback
     def _drop_assumed_door(self) -> None:
@@ -235,6 +269,11 @@ class SolityStatusCoordinator(DataUpdateCoordinator[dict]):
                     trace.append({"t": elapsed, "result": "no_answer"})
                     self._drop_assumed_door()
                     wait = VERIFY_UNKNOWN_RECHECK
+                elif self._stale_locked:
+                    # Bolt still reads out right after HA's unlock: the
+                    # command hasn't landed yet. Read again shortly.
+                    trace.append({"t": elapsed, "result": "locked_early"})
+                    wait = VERIFY_CLOSED_RECHECK
                 elif self.is_locked:
                     trace.append({"t": elapsed, "result": "locked"})
                     self._record_verify(elapsed, polls, "locked", trace)
