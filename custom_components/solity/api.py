@@ -193,9 +193,10 @@ class SolityClient:
         data = await self.control(device_id, "get_status", "")
         msg = (data.get("contents") or {}).get("controlDeviceMessage", "{}")
         try:
-            return json.loads(msg)
+            status = json.loads(msg)
         except (ValueError, TypeError):
             return {}
+        return status if isinstance(status, dict) else {}
 
     async def retrieve_log(
         self,
