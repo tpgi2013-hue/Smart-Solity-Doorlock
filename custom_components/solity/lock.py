@@ -70,7 +70,7 @@ class SolityLock(CoordinatorEntity[SolityStatusCoordinator], LockEntity):
             # True while the lock doesn't answer at all and is re-polled slowly.
             "not_answering": self.coordinator.recovering,
             # False = value is assumed (open seen / poll missed), not read back.
-            "confirmed": self.coordinator.last_poll_ok,
+            "confirmed": self.coordinator.confirmed,
             # Latest post-open check: seconds after the open was detected, how
             # many status polls it took, and what each poll saw.
             "last_verify_seconds": self.coordinator.last_verify_seconds,
@@ -93,11 +93,12 @@ class SolityLock(CoordinatorEntity[SolityStatusCoordinator], LockEntity):
 
     async def async_lock(self, **kwargs: Any) -> None:
         await self._command("lock")
+        self.coordinator.cancel_unlock_grace()
         self.coordinator.start_verify()
 
     async def async_unlock(self, **kwargs: Any) -> None:
         await self._command("unlock")
-        self.coordinator.mark_unlocked()
+        self.coordinator.mark_unlocked(from_ha=True)
         self.coordinator.start_verify()
 
     async def async_open(self, **kwargs: Any) -> None:

@@ -58,6 +58,12 @@ VERIFY_TRACE_LEN = 15
 VERIFY_POLL_TIMEOUT = 2.5
 VERIFY_POLL_RETRIES = 3
 
+# Right after HA sends an unlock, a status read can still show the bolt out
+# (the motor hasn't moved yet / the cloud answers from before the command).
+# Within this many seconds of an HA unlock a 'locked' reading is treated as
+# stale: the lock stays 'unlocked' and the check reads it again shortly.
+UNLOCK_GRACE = 5
+
 # When the lock stops answering (WiFi module stuck/offline, seen in the field),
 # don't wait for the next regular status poll (up to hours): re-poll after
 # these delays, staying at the last one, until it answers again.
