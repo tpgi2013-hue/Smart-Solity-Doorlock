@@ -63,21 +63,25 @@ def _hash(pw):
 
 
 async def test_stale_locked_right_after_ha_unlock_is_ignored(hass, freezer):
-    """Bolt still reads 'out' just after HA's unlock: not a relock."""
+    """Bolt still reads 'out' just after HA's unlock: not a relock.
+
+    Since v1.7.5 the first check waits until the unlock has landed, so a stale
+    'locked' is no longer read at all; the lock stays unlocked meanwhile.
+    """
     freezer.move_to(START)
     fake = Fake()
     entry, p = await _setup(hass, fake)
-    # fake.deadbolt stays 1: the unlock hasn't landed on the first reads
+    before = fake.status_calls
     await hass.services.async_call("lock", "unlock", {"entity_id": LOCK}, blocking=True)
     await _tick(hass, freezer, 0.5)
     st = hass.states.get(LOCK)
     assert st.state == "unlocked"
     assert st.attributes["verifying"] is True
     assert st.attributes["confirmed"] is False
-    assert _results(hass)[0] == "locked_early"
-    # now the motor moves
+    assert fake.status_calls == before  # nothing read during the settle
+    # the motor has moved by the time of the first check
     fake.deadbolt = 0
-    await _tick(hass, freezer, 2)
+    await _tick(hass, freezer, 5)
     st = hass.states.get(LOCK)
     assert st.state == "unlocked" and st.attributes["confirmed"] is True
     # ...and the door shuts and auto-lock fires: a real relock is accepted
@@ -86,7 +90,6 @@ async def test_stale_locked_right_after_ha_unlock_is_ignored(hass, freezer):
     st = hass.states.get(LOCK)
     assert st.state == "locked"
     assert st.attributes["last_verify_result"] == "locked"
-    assert "locked_early" in _results(hass)
     p.stop()
 
 

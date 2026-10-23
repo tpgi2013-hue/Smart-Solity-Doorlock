@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
+from collections.abc import AsyncIterator
 from datetime import timedelta
 from typing import Any
 
@@ -14,6 +16,9 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 from .api import SolityAuthError, SolityClient, SolityError
 from .const import (
     DOMAIN,
+    HA_UNLOCK_POLL_RETRIES,
+    HA_UNLOCK_RETRY_DELAY,
+    HA_UNLOCK_SETTLE,
     LOG_MEDIA_REMOTE,
     OPEN_LOG_CODES,
     RECOVER_DELAYS,
@@ -91,15 +96,41 @@ class SolityStatusCoordinator(DataUpdateCoordinator[dict]):
         # True when the latest reading was such a stale 'locked' (shown as
         # unlocked; the check reads the lock again shortly).
         self._stale_locked = False
+        # One get_status at a time, and none while a command is being sent:
+        # the WiFi+ module handles one request at a time and stops answering
+        # when they pile up. Commands themselves never wait for a status poll.
+        self._status_lock = asyncio.Lock()
+        self._commands = 0
+        self._command_idle = asyncio.Event()
+        self._command_idle.set()
+
+    # -------------------------------------------------------------- commands
+    @contextlib.asynccontextmanager
+    async def command(self) -> AsyncIterator[None]:
+        """Wrap an open/close call: status polls hold off until it is done."""
+        self._commands += 1
+        self._command_idle.clear()
+        try:
+            yield
+        finally:
+            self._commands -= 1
+            if not self._commands:
+                self._command_idle.set()
+
+    async def _get_status(self) -> dict:
+        await self._command_idle.wait()
+        async with self._status_lock:
+            await self._command_idle.wait()
+            return await self.client.get_status(self.device_id)
 
     # ------------------------------------------------------------------ poll
     async def _async_update_data(self) -> dict:
         try:
             if self._fast:
                 async with asyncio.timeout(VERIFY_POLL_TIMEOUT):
-                    data = await self.client.get_status(self.device_id)
+                    data = await self._get_status()
             else:
-                data = await self.client.get_status(self.device_id)
+                data = await self._get_status()
         except SolityAuthError as err:
             self.last_poll_ok = False
             raise ConfigEntryAuthFailed(str(err)) from err
@@ -232,8 +263,12 @@ class SolityStatusCoordinator(DataUpdateCoordinator[dict]):
 
     # ---------------------------------------------------------------- verify
     @callback
-    def start_verify(self) -> None:
-        """(Re)start the post-open burst of status polls."""
+    def start_verify(self, after_ha_unlock: bool = False) -> None:
+        """(Re)start the post-open burst of status polls.
+
+        ``after_ha_unlock``: HA just sent the unlock. Let the module finish
+        relaying it before the first check, and retry missed checks gently.
+        """
         if self._verify_task is not None and not self._verify_task.done():
             self._verify_task.cancel()
         if self.recovering:
@@ -241,12 +276,12 @@ class SolityStatusCoordinator(DataUpdateCoordinator[dict]):
             self._recover_task.cancel()
             self._recover_task = None
         self._verify_task = self.config_entry.async_create_background_task(
-            self.hass, self._async_verify(), f"{DOMAIN}_verify_lock"
+            self.hass, self._async_verify(after_ha_unlock), f"{DOMAIN}_verify_lock"
         )
         # Make the lock entity's 'verifying' attribute visible right away.
         self.async_update_listeners()
 
-    async def _async_verify(self) -> None:
+    async def _async_verify(self, after_ha_unlock: bool = False) -> None:
         """Poll until the deadbolt reads locked, pacing by the door state."""
         loop = asyncio.get_running_loop()
         start = loop.time()
@@ -255,10 +290,19 @@ class SolityStatusCoordinator(DataUpdateCoordinator[dict]):
         closed_streak = 0
         trace: list[dict[str, Any]] = []
         self.last_verify_trace = trace
+        if after_ha_unlock:
+            retries, retry_delay = HA_UNLOCK_POLL_RETRIES, HA_UNLOCK_RETRY_DELAY
+        else:
+            retries, retry_delay = VERIFY_POLL_RETRIES, 0
         try:
+            if after_ha_unlock:
+                await asyncio.sleep(HA_UNLOCK_SETTLE)
             while polls < VERIFY_MAX_POLLS:
-                # A missed (timed-out) poll is retried immediately.
-                for _ in range(1 + VERIFY_POLL_RETRIES):
+                # A missed (timed-out) poll is retried (at once after a logged
+                # open, a few seconds later after an HA unlock).
+                for attempt in range(1 + retries):
+                    if attempt and retry_delay:
+                        await asyncio.sleep(retry_delay)
                     await self._async_fast_refresh()
                     polls += 1
                     if self.last_poll_ok:

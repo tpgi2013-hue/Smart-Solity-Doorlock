@@ -83,7 +83,8 @@ class SolityLock(CoordinatorEntity[SolityStatusCoordinator], LockEntity):
         client = self.coordinator.client
         send = client.close if action == "lock" else client.open
         try:
-            await send(self.coordinator.device_id)
+            async with self.coordinator.command():
+                await send(self.coordinator.device_id)
         except SolityError as err:
             raise HomeAssistantError(
                 translation_domain=DOMAIN,
@@ -99,7 +100,7 @@ class SolityLock(CoordinatorEntity[SolityStatusCoordinator], LockEntity):
     async def async_unlock(self, **kwargs: Any) -> None:
         await self._command("unlock")
         self.coordinator.mark_unlocked(from_ha=True)
-        self.coordinator.start_verify()
+        self.coordinator.start_verify(after_ha_unlock=True)
 
     async def async_open(self, **kwargs: Any) -> None:
         await self.async_unlock(**kwargs)

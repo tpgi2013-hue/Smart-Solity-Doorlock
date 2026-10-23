@@ -25,7 +25,7 @@ async def test_ha_unlock_then_its_log_entry_keeps_real_door(hass, freezer):
     entry, p = await _setup(hass, fake)
     fake.deadbolt = 0  # unlocked, door still shut
     await hass.services.async_call("lock", "unlock", {"entity_id": LOCK}, blocking=True)
-    await _tick(hass, freezer, 1)
+    await _tick(hass, freezer, 6)  # first check after the v1.7.5 settle
     assert hass.states.get(DOOR).state == "off"
     fake.logs.insert(
         0, {"logDateTime": "2026-10-12 07:00:05", "logCode": "1", "mediaType": "7"}
