@@ -64,6 +64,19 @@ VERIFY_POLL_RETRIES = 3
 # stale: the lock stays 'unlocked' and the check reads it again shortly.
 UNLOCK_GRACE = 5
 
+# Right after HA sends an unlock the WiFi+ module is busy relaying the command
+# and uploading the open event. Status polls fired into that window (v1.7.4:
+# at once, cut at 2.5s and retried 3x back to back) piled up behind the
+# command and, with repeated HA unlocks (face recognition), left the module
+# not answering at all until the lock was restarted. After an HA unlock the
+# first check therefore waits HA_UNLOCK_SETTLE seconds, and a missed check is
+# retried only HA_UNLOCK_POLL_RETRIES time(s), HA_UNLOCK_RETRY_DELAY seconds
+# later. Opens detected in the log (code, card, fingerprint ...) keep the
+# immediate check above. The unlock itself is never delayed.
+HA_UNLOCK_SETTLE = 5
+HA_UNLOCK_POLL_RETRIES = 1
+HA_UNLOCK_RETRY_DELAY = 3
+
 # When the lock stops answering (WiFi module stuck/offline, seen in the field),
 # don't wait for the next regular status poll (up to hours): re-poll after
 # these delays, staying at the last one, until it answers again.
