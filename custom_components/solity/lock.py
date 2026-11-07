@@ -7,6 +7,7 @@ lock, paced by the door state, until the deadbolt reads locked again.
 """
 from __future__ import annotations
 
+import time
 from typing import Any
 
 from homeassistant.components.lock import LockEntity, LockEntityFeature
@@ -77,6 +78,9 @@ class SolityLock(CoordinatorEntity[SolityStatusCoordinator], LockEntity):
             "last_verify_polls": self.coordinator.last_verify_polls,
             "last_verify_result": self.coordinator.last_verify_result,
             "last_verify_trace": self.coordinator.last_verify_trace,
+            # Latest open/close API call: which, and how long it took (s).
+            "last_command": self.coordinator.last_command_action,
+            "last_command_seconds": self.coordinator.last_command_seconds,
         }
 
     async def _command(self, action: str) -> None:
@@ -84,7 +88,13 @@ class SolityLock(CoordinatorEntity[SolityStatusCoordinator], LockEntity):
         send = client.close if action == "lock" else client.open
         try:
             async with self.coordinator.command():
-                await send(self.coordinator.device_id)
+                started = time.monotonic()
+                try:
+                    await send(self.coordinator.device_id)
+                finally:
+                    self.coordinator.record_command(
+                        action, time.monotonic() - started
+                    )
         except SolityError as err:
             raise HomeAssistantError(
                 translation_domain=DOMAIN,

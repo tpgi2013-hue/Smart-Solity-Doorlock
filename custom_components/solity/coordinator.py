@@ -15,7 +15,9 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 
 from .api import SolityAuthError, SolityClient, SolityError
 from .const import (
+    CONF_NICKNAME,
     DOMAIN,
+    EVENT_UNLOCK,
     HA_UNLOCK_POLL_RETRIES,
     HA_UNLOCK_RETRY_DELAY,
     HA_UNLOCK_SETTLE,
@@ -34,6 +36,7 @@ from .const import (
     VERIFY_TRACE_LEN,
     VERIFY_UNKNOWN_RECHECK,
     VERIFY_WINDOW,
+    WAKE_MIN_INTERVAL,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -103,11 +106,19 @@ class SolityStatusCoordinator(DataUpdateCoordinator[dict]):
         self._commands = 0
         self._command_idle = asyncio.Event()
         self._command_idle.set()
+        # How long the latest open/close API call took (diagnostics).
+        self.last_command_seconds: float | None = None
+        self.last_command_action: str | None = None
+        # Optional pre-wake poll (solity.wake) and when the last one started.
+        self._wake_task: asyncio.Task | None = None
+        self._last_wake: float | None = None
 
     # -------------------------------------------------------------- commands
     @contextlib.asynccontextmanager
     async def command(self) -> AsyncIterator[None]:
         """Wrap an open/close call: status polls hold off until it is done."""
+        # A pre-wake poll never makes a command wait behind it.
+        self._cancel_wake()
         self._commands += 1
         self._command_idle.clear()
         try:
@@ -116,6 +127,56 @@ class SolityStatusCoordinator(DataUpdateCoordinator[dict]):
             self._commands -= 1
             if not self._commands:
                 self._command_idle.set()
+
+    @callback
+    def record_command(self, action: str, seconds: float) -> None:
+        """Remember how long the latest open/close call took."""
+        self.last_command_action = action
+        self.last_command_seconds = round(seconds, 2)
+
+    # ------------------------------------------------------------------ wake
+    @callback
+    def _cancel_wake(self) -> None:
+        if self._wake_task is not None and not self._wake_task.done():
+            self._wake_task.cancel()
+        self._wake_task = None
+
+    @callback
+    def async_wake(self) -> str:
+        """Wake the lock with one fast status poll, ahead of an expected open.
+
+        Meant for 'someone is approaching the door'. Deliberately cautious: the
+        WiFi+ module handles one request at a time, so nothing is sent while a
+        command, another status poll or a post-open check is running, nor more
+        often than WAKE_MIN_INTERVAL. A command that arrives later cancels it.
+        Returns ``started`` or the reason it was skipped.
+        """
+        loop = asyncio.get_running_loop()
+        if self._commands:
+            return "skipped_command"
+        if self._status_lock.locked() or (
+            self._wake_task is not None and not self._wake_task.done()
+        ):
+            return "skipped_busy"
+        if self.verifying or self.recovering:
+            return "skipped_verifying"
+        if (
+            self._last_wake is not None
+            and loop.time() - self._last_wake < WAKE_MIN_INTERVAL
+        ):
+            return "skipped_recent"
+        self._last_wake = loop.time()
+        self._wake_task = self.config_entry.async_create_background_task(
+            self.hass, self._async_wake(), f"{DOMAIN}_wake_lock"
+        )
+        return "started"
+
+    async def _async_wake(self) -> None:
+        try:
+            await self._async_fast_refresh()
+        finally:
+            if self._wake_task is asyncio.current_task():
+                self._wake_task = None
 
     async def _get_status(self) -> dict:
         await self._command_idle.wait()
@@ -269,6 +330,7 @@ class SolityStatusCoordinator(DataUpdateCoordinator[dict]):
         ``after_ha_unlock``: HA just sent the unlock. Let the module finish
         relaying it before the first check, and retry missed checks gently.
         """
+        self._cancel_wake()
         if self._verify_task is not None and not self._verify_task.done():
             self._verify_task.cancel()
         if self.recovering:
@@ -434,6 +496,21 @@ class SolityStatusCoordinator(DataUpdateCoordinator[dict]):
             opens = [x for x in new if x.get("logCode") in OPEN_LOG_CODES]
             if not opens:
                 return
+            # Oldest first, one bus event per open (for automations).
+            for item in reversed(opens):
+                self.hass.bus.async_fire(
+                    EVENT_UNLOCK,
+                    {
+                        "device_id": self.device_id,
+                        "entry_id": self.config_entry.entry_id,
+                        "nickname": self.config_entry.data.get(CONF_NICKNAME),
+                        "time": item.get("logDateTime"),
+                        "log_code": item.get("logCode"),
+                        "media_type": str(item.get("mediaType")),
+                        "message": item.get("logMessage"),
+                        "remote": str(item.get("mediaType")) == LOG_MEDIA_REMOTE,
+                    },
+                )
             if all(str(x.get("mediaType")) == LOG_MEDIA_REMOTE for x in opens):
                 # Remote open (app / HA): nobody need be at the door. When HA
                 # sent it, the check is already running and has read the real

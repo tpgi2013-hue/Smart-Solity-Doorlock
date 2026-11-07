@@ -82,5 +82,11 @@
       "title": "Smart Solity account is also used by the app",
       "description": "The Smart Solity server allows only one login per account. Home Assistant and the phone app using {email} keep logging each other out. Create a second account, invite it as a member from the owner's app, then switch Home Assistant to it: Settings → Devices & services → Smart Solity → ⋮ → Reconfigure."
     }
+  },
+  "services": {
+    "wake": {
+      "name": "Wake the lock",
+      "description": "Sends one guarded status poll so the lock is awake when an open follows (e.g. when someone approaches the door). Skipped while a command or another poll is running, or within 10 s of the last wake. Returns the result per entry."
+    }
   }
 }
