@@ -117,3 +117,9 @@ OPEN_LOG_CODES = (LOG_CODE_OPEN, LOG_CODE_OPEN_LONG)
 # A remote open does not mean someone is at the door, so the door is not
 # assumed open for it.
 LOG_MEDIA_REMOTE = "7"
+
+# Pre-wake (solity.wake): at most one wake poll per this many seconds.
+WAKE_MIN_INTERVAL = 10
+SERVICE_WAKE = "wake"
+# Bus event fired for every new open seen in the lock's event log.
+EVENT_UNLOCK = f"{DOMAIN}_unlock"

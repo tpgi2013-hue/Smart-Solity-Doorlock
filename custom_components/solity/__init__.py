@@ -5,7 +5,7 @@ from dataclasses import dataclass
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
-from homeassistant.core import HomeAssistant, callback
+from homeassistant.core import HomeAssistant, ServiceCall, SupportsResponse, callback
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
@@ -26,6 +26,7 @@ from .const import (
     LEGACY_CALIBRATION_STORE,
     LEGACY_ENTITIES,
     LEGACY_OPTION_KEYS,
+    SERVICE_WAKE,
 )
 from .coordinator import SolityLogCoordinator, SolityStatusCoordinator
 
@@ -66,6 +67,24 @@ async def _async_cleanup_legacy(hass: HomeAssistant, entry: SolityConfigEntry) -
         )
         if old:
             ent_reg.async_remove(old)
+
+
+@callback
+def _async_register_services(hass: HomeAssistant) -> None:
+    """solity.wake: one guarded status poll to wake the lock ahead of an open."""
+    if hass.services.has_service(DOMAIN, SERVICE_WAKE):
+        return
+
+    @callback
+    def _wake(call: ServiceCall) -> dict[str, str]:
+        results: dict[str, str] = {}
+        for entry in hass.config_entries.async_loaded_entries(DOMAIN):
+            results[entry.entry_id] = entry.runtime_data.status.async_wake()
+        return results
+
+    hass.services.async_register(
+        DOMAIN, SERVICE_WAKE, _wake, supports_response=SupportsResponse.OPTIONAL
+    )
 
 
 def _issue_id(entry: SolityConfigEntry) -> str:
@@ -116,12 +135,23 @@ async def async_setup_entry(hass: HomeAssistant, entry: SolityConfigEntry) -> bo
     entry.async_on_unload(entry.add_update_listener(_async_update_listener))
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    _async_register_services(hass)
     return True
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: SolityConfigEntry) -> bool:
     """Unload a config entry."""
-    return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    unloaded = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    if unloaded:
+        entry.runtime_data.status._cancel_wake()
+        others = [
+            e
+            for e in hass.config_entries.async_loaded_entries(DOMAIN)
+            if e.entry_id != entry.entry_id
+        ]
+        if not others:
+            hass.services.async_remove(DOMAIN, SERVICE_WAKE)
+    return unloaded
 
 
 async def _async_update_listener(hass: HomeAssistant, entry: SolityConfigEntry) -> None:
