@@ -54,14 +54,9 @@ SENSORS: tuple[SolityBleSensorDescription, ...] = (
         entity_category=EntityCategory.DIAGNOSTIC,
         value_fn=lambda s: s.count_fingerprint,
     ),
-    SolityBleSensorDescription(
-        key="count_face",
-        translation_key="count_face",
-        icon="mdi:face-recognition",
-        state_class=SensorStateClass.MEASUREMENT,
-        entity_category=EntityCategory.DIAGNOSTIC,
-        value_fn=lambda s: s.count_face,
-    ),
+    # No count_face / count_vein: this lock's face reader is the separate FM225
+    # module (ESPHome), so the lock's BLE status never reports those — use the
+    # FM225 entity (sensor.front_door_face_face_count) for registered faces.
     SolityBleSensorDescription(
         key="count_remote",
         translation_key="count_remote",
@@ -77,14 +72,6 @@ SENSORS: tuple[SolityBleSensorDescription, ...] = (
         state_class=SensorStateClass.MEASUREMENT,
         entity_category=EntityCategory.DIAGNOSTIC,
         value_fn=lambda s: s.count_mastercard,
-    ),
-    SolityBleSensorDescription(
-        key="count_vein",
-        translation_key="count_vein",
-        icon="mdi:hand-back-right",
-        state_class=SensorStateClass.MEASUREMENT,
-        entity_category=EntityCategory.DIAGNOSTIC,
-        value_fn=lambda s: s.count_vein,
     ),
     SolityBleSensorDescription(
         key="system_mode",
