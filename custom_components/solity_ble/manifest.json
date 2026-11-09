@@ -3,11 +3,15 @@
   "name": "Solity Doorlock (BLE)",
   "codeowners": [],
   "config_flow": true,
-  "dependencies": ["bluetooth_adapters"],
+  "dependencies": [
+    "bluetooth_adapters"
+  ],
   "documentation": "https://github.com/tpgi2013-hue/Smart-Solity-Doorlock",
   "integration_type": "device",
   "iot_class": "local_push",
   "issue_tracker": "https://github.com/tpgi2013-hue/Smart-Solity-Doorlock/issues",
-  "requirements": ["bleak-retry-connector>=3.5.0"],
-  "version": "1.0.0"
+  "requirements": [
+    "bleak-retry-connector>=3.5.0"
+  ],
+  "version": "1.1.0"
 }

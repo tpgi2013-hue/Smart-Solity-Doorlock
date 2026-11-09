@@ -13,6 +13,11 @@ Right after auth the lock pushes a 0xD1 status frame (deadbolt, sub-latch,
 battery, registered-credential counts, system mode). Every BLE session
 captures it, so open/close/status all return a fresh ``SolityStatus``.
 
+Warm sessions: ``async_prewarm`` connects and authenticates ahead of time and
+holds the session for a short window. A command arriving inside that window
+skips the (slow, ~3 s) connection setup and only pays for the command itself.
+Outside a prewarm window every command connects, runs and disconnects.
+
 Frame: ``48 <len> <cmd> <data...> <checksum>`` with ``len = len(data)+1`` and
 ``checksum = (len + cmd + sum(data)) & 0xFF``. The AES key is fixed across
 (non-China) locks; the per-lock secret is ``appKey`` — the owner account's
@@ -65,7 +70,8 @@ CLOSE_SUFFIX = bytes()
 CONNECT_ATTEMPTS = 4
 RECV_TIMEOUT = 6.0
 CMD_RECV_TIMEOUT = 8.0
-STATUS_DRAIN_TIMEOUT = 2.5
+# After a command the lock may push one more 0xD1; it arrives within ~0.2 s.
+STATUS_DRAIN_TIMEOUT = 0.4
 
 
 class SolityBleError(Exception):
@@ -167,7 +173,14 @@ class SolityBleClient:
         self.hass = hass
         self.mac = mac.upper()
         self.app_key = app_key
-        self._lock = asyncio.Lock()
+        self._lock = asyncio.Lock()  # one BLE operation at a time per lock
+        self._client: BleakClientWithServiceCache | None = None
+        self._iv: bytes | None = None
+        self._queue: asyncio.Queue[bytes] = asyncio.Queue()
+        self._status: SolityStatus | None = None
+        self._hold_handle: asyncio.TimerHandle | None = None
+
+    # ---- public API -----------------------------------------------------
 
     async def async_open(self) -> SolityStatus | None:
         """Retract the deadbolt. Returns the status captured this session."""
@@ -181,15 +194,98 @@ class SolityBleClient:
         """Connect, authenticate, request status (0x51), and parse 0xD1."""
         return await self._run(CMD_STATUS_REQ, b"", ACK_STATUS)
 
-    async def _run(
-        self, cmd: int | None, suffix: bytes | None, ack: int | None
-    ) -> SolityStatus | None:
-        async with self._lock:  # one BLE session at a time per lock
-            return await self._session(cmd, suffix, ack)
+    async def async_prewarm(self, hold_seconds: float) -> None:
+        """Connect + authenticate now and keep the session for ``hold_seconds``.
 
-    async def _session(
-        self, cmd: int | None, suffix: bytes | None, ack: int | None
-    ) -> SolityStatus | None:
+        A command sent inside the window reuses the session (no connect delay).
+        Calling again while warm just extends the window.
+        """
+        async with self._lock:
+            self._cancel_hold()
+            try:
+                await self._ensure_session()
+            except BaseException:
+                await self._teardown()
+                raise
+            self._hold_handle = self.hass.loop.call_later(
+                hold_seconds, self._hold_expired
+            )
+
+    async def async_shutdown(self) -> None:
+        """Drop any warm session (integration unload)."""
+        async with self._lock:
+            self._cancel_hold()
+            await self._teardown()
+
+    # ---- session handling -------------------------------------------------
+
+    def _is_warm(self) -> bool:
+        return (
+            self._client is not None
+            and self._client.is_connected
+            and self._iv is not None
+        )
+
+    def _cancel_hold(self) -> None:
+        if self._hold_handle is not None:
+            self._hold_handle.cancel()
+            self._hold_handle = None
+
+    def _hold_expired(self) -> None:
+        handle = self._hold_handle
+        self.hass.async_create_task(self._release(handle))
+
+    async def _release(self, handle: asyncio.TimerHandle | None) -> None:
+        async with self._lock:
+            if self._hold_handle is not handle:
+                return  # window was extended or consumed by a command
+            self._hold_handle = None
+            await self._teardown()
+
+    async def _teardown(self) -> None:
+        client, self._client, self._iv = self._client, None, None
+        if client is None:
+            return
+        with contextlib.suppress(Exception):
+            await client.stop_notify(NOTIFY_UUID)
+        with contextlib.suppress(Exception):
+            await client.disconnect()
+
+    def _on_notify(self, _char: BleakGATTCharacteristic, data: bytearray) -> None:
+        self._queue.put_nowait(bytes(data))
+
+    def _note(self, frame: bytes) -> None:
+        if len(frame) >= 3 and frame[0] == STX and frame[2] == ACK_STATUS:
+            _LOGGER.debug("Solity BLE 0xD1 status frame: %s", frame.hex())
+            self._status = _parse_status(frame[3 : 3 + (frame[1] - 1)])
+
+    async def _await(self, want: int, iv: bytes | None, timeout: float) -> bytes:
+        while True:
+            raw = await asyncio.wait_for(self._queue.get(), timeout)
+            frame = raw if iv is None else _decrypt(raw, iv)
+            if len(frame) < 3 or frame[0] != STX:
+                continue
+            if frame[2] == ACK_ERROR:
+                raise SolityBleError("lock reported receive error (0xFF)")
+            self._note(frame)
+            if frame[2] == want:
+                return frame
+
+    async def _ensure_session(self) -> None:
+        """Have a connected, authenticated session (reusing a warm one)."""
+        if self._is_warm():
+            return
+        await self._teardown()
+        try:
+            await self._connect_and_auth()
+        except TimeoutError as err:
+            raise SolityBleError("timed out waiting for lock response") from err
+        except SolityBleError:
+            raise
+        except Exception as err:  # noqa: BLE001
+            raise SolityBleError(f"BLE error: {err}") from err
+
+    async def _connect_and_auth(self) -> None:
         ble_device = bluetooth.async_ble_device_from_address(
             self.hass, self.mac, connectable=True
         )
@@ -197,104 +293,101 @@ class SolityBleClient:
             raise SolityBleError(
                 f"{self.mac} not reachable by any Bluetooth proxy right now"
             )
-
-        queue: asyncio.Queue[bytes] = asyncio.Queue()
-
-        def _on_notify(_char: BleakGATTCharacteristic, data: bytearray) -> None:
-            queue.put_nowait(bytes(data))
-
-        status: SolityStatus | None = None
-
-        def _note(frame: bytes) -> None:
-            nonlocal status
-            if len(frame) >= 3 and frame[0] == STX and frame[2] == ACK_STATUS:
-                _LOGGER.debug("Solity BLE 0xD1 status frame: %s", frame.hex())
-                status = _parse_status(frame[3 : 3 + (frame[1] - 1)])
-
+        self._queue = asyncio.Queue()
+        self._status = None
         client = await establish_connection(
             BleakClientWithServiceCache,
             ble_device,
             self.mac,
             max_attempts=CONNECT_ATTEMPTS,
         )
+        self._client = client
+        await client.start_notify(NOTIFY_UUID, self._on_notify)
+
+        # 1) EXCHANGE_KEY (plaintext) -> 0x90 with the receive key
+        await client.write_gatt_char(
+            WRITE_UUID,
+            _build(CMD_EXCHANGE_KEY, _time_key() + self.app_key),
+            response=True,
+        )
+        exch = await self._await(ACK_EXCHANGE_KEY, None, RECV_TIMEOUT)
+        receive_key = exch[3 : 3 + (exch[1] - 1)]
+        if len(receive_key) < 8:
+            raise SolityBleError(f"short receiveKey ({len(receive_key)}B)")
+
+        # 2) session IV = appKey[0:8] + receiveKey[0:8]
+        iv = (bytes(self.app_key[:8]) + bytes(receive_key[:8]) + bytes(16))[:16]
+
+        # 3) AUTH_APP (encrypted) -> 0x91 result 0
+        await client.write_gatt_char(
+            WRITE_UUID,
+            _encrypt(_build(CMD_AUTH_APP, _time_key() + self.app_key), iv),
+            response=True,
+        )
+        auth = await self._await(ACK_AUTH_APP, iv, RECV_TIMEOUT)
+        if auth[3] != 0:
+            raise SolityBleError(f"auth rejected (result={auth[3]})")
+        self._iv = iv
+        _LOGGER.debug("Solity BLE session ready (%s)", self.mac)
+
+    # ---- commands -------------------------------------------------------
+
+    async def _run(self, cmd: int, suffix: bytes, ack: int) -> SolityStatus | None:
+        async with self._lock:
+            self._cancel_hold()
+            warm = self._is_warm()
+            try:
+                try:
+                    return await self._command(cmd, suffix, ack)
+                except SolityBleError as err:
+                    if not warm:
+                        raise
+                    # The prewarmed session went stale (lock dropped it);
+                    # retry once on a fresh connection.
+                    _LOGGER.debug("Solity BLE warm session failed (%s), retrying", err)
+                    await self._teardown()
+                    return await self._command(cmd, suffix, ack)
+            finally:
+                await self._teardown()
+
+    async def _command(self, cmd: int, suffix: bytes, ack: int) -> SolityStatus | None:
+        warm = self._is_warm()
+        await self._ensure_session()
+        client, iv = self._client, self._iv
+        assert client is not None and iv is not None
         try:
-            await client.start_notify(NOTIFY_UUID, _on_notify)
-
-            async def _await(want: int, iv: bytes | None, timeout: float) -> bytes:
-                while True:
-                    raw = await asyncio.wait_for(queue.get(), timeout)
-                    frame = raw if iv is None else _decrypt(raw, iv)
-                    if len(frame) < 3 or frame[0] != STX:
-                        continue
-                    if frame[2] == ACK_ERROR:
-                        raise SolityBleError("lock reported receive error (0xFF)")
-                    _note(frame)
-                    if frame[2] == want:
-                        return frame
-
-            # 1) EXCHANGE_KEY (plaintext) -> 0x90 with the receive key
+            cmd_data = _time_key() + self.app_key + suffix
             await client.write_gatt_char(
-                WRITE_UUID,
-                _build(CMD_EXCHANGE_KEY, _time_key() + self.app_key),
-                response=True,
+                WRITE_UUID, _encrypt(_build(cmd, cmd_data), iv), response=True
             )
-            exch = await _await(ACK_EXCHANGE_KEY, None, RECV_TIMEOUT)
-            receive_key = exch[3 : 3 + (exch[1] - 1)]
-            if len(receive_key) < 8:
-                raise SolityBleError(f"short receiveKey ({len(receive_key)}B)")
-
-            # 2) session IV = appKey[0:8] + receiveKey[0:8]
-            iv = (bytes(self.app_key[:8]) + bytes(receive_key[:8]) + bytes(16))[:16]
-
-            # 3) AUTH_APP (encrypted) -> 0x91 result 0
-            await client.write_gatt_char(
-                WRITE_UUID,
-                _encrypt(_build(CMD_AUTH_APP, _time_key() + self.app_key), iv),
-                response=True,
-            )
-            auth = await _await(ACK_AUTH_APP, iv, RECV_TIMEOUT)
-            if auth[3] != 0:
-                raise SolityBleError(f"auth rejected (result={auth[3]})")
-
-            # 4) optional OPEN / CLOSE (encrypted) -> 0xA1 / 0xA2 result 0
-            if cmd is not None:
-                cmd_data = _time_key() + self.app_key + (suffix or b"")
-                await client.write_gatt_char(
-                    WRITE_UUID, _encrypt(_build(cmd, cmd_data), iv), response=True
+            done = await self._await(ack, iv, CMD_RECV_TIMEOUT)
+            # OPEN/CLOSE reply with a result byte; the 0xD1 status reply is
+            # the payload itself (captured by _note), not a result.
+            if cmd in (CMD_OPEN, CMD_CLOSE) and done[3] != 0:
+                raise SolityBleError(
+                    f"command 0x{cmd:02X} rejected (result={done[3]})"
                 )
-                done = await _await(ack, iv, CMD_RECV_TIMEOUT)
-                # OPEN/CLOSE reply with a result byte; the 0xD1 status reply
-                # is the payload itself (captured by _note), not a result.
-                if cmd in (CMD_OPEN, CMD_CLOSE) and done[3] != 0:
-                    raise SolityBleError(
-                        f"command 0x{cmd:02X} rejected (result={done[3]})"
-                    )
 
-            # 5) drain remaining frames briefly to capture the pushed 0xD1 status
+            # Briefly drain to capture a pushed 0xD1 status.
             with contextlib.suppress(TimeoutError):
                 while True:
-                    raw = await asyncio.wait_for(queue.get(), STATUS_DRAIN_TIMEOUT)
+                    raw = await asyncio.wait_for(
+                        self._queue.get(), STATUS_DRAIN_TIMEOUT
+                    )
                     frame = _decrypt(raw, iv)
-                    if len(frame) >= 3 and frame[0] == STX:
-                        if frame[2] == ACK_ERROR:
-                            continue
-                        _note(frame)
+                    if len(frame) >= 3 and frame[0] == STX and frame[2] != ACK_ERROR:
+                        self._note(frame)
 
-            if cmd is not None:
-                _LOGGER.debug("Solity BLE 0x%02X OK (%s)", cmd, self.mac)
-            return status
+            _LOGGER.debug(
+                "Solity BLE 0x%02X OK (%s, %s session)",
+                cmd,
+                self.mac,
+                "warm" if warm else "cold",
+            )
+            return self._status
         except TimeoutError as err:
             raise SolityBleError("timed out waiting for lock response") from err
         except SolityBleError:
             raise
         except Exception as err:  # noqa: BLE001
             raise SolityBleError(f"BLE error: {err}") from err
-        finally:
-            try:
-                await client.stop_notify(NOTIFY_UUID)
-            except Exception:  # noqa: BLE001
-                pass
-            try:
-                await client.disconnect()
-            except Exception:  # noqa: BLE001
-                pass

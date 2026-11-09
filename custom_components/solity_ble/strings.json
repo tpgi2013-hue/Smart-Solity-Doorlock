@@ -31,13 +31,32 @@
   },
   "entity": {
     "sensor": {
-      "count_card": { "name": "Registered cards" },
-      "count_password": { "name": "Registered passwords" },
-      "count_remote": { "name": "Registered remotes" },
-      "count_mastercard": { "name": "Master cards" },
-      "system_mode": { "name": "System mode" },
-      "sub_latch": { "name": "Sub-latch" },
-      "rssi": { "name": "Signal strength" }
+      "count_card": {
+        "name": "Registered cards"
+      },
+      "count_password": {
+        "name": "Registered passwords"
+      },
+      "count_remote": {
+        "name": "Registered remotes"
+      },
+      "count_mastercard": {
+        "name": "Master cards"
+      },
+      "system_mode": {
+        "name": "System mode"
+      },
+      "sub_latch": {
+        "name": "Sub-latch"
+      },
+      "rssi": {
+        "name": "Signal strength"
+      }
+    },
+    "button": {
+      "prewarm": {
+        "name": "Prewarm connection"
+      }
     }
   }
 }

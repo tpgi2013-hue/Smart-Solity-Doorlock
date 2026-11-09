@@ -52,6 +52,11 @@
       "rssi": {
         "name": "신호 세기"
       }
+    },
+    "button": {
+      "prewarm": {
+        "name": "연결 예열"
+      }
     }
   }
 }

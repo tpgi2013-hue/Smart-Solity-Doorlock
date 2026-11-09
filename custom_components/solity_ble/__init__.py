@@ -24,7 +24,7 @@ from .const import (
 )
 from .coordinator import SolityBleCoordinator
 
-PLATFORMS: list[Platform] = [Platform.LOCK, Platform.SENSOR]
+PLATFORMS: list[Platform] = [Platform.BUTTON, Platform.LOCK, Platform.SENSOR]
 
 
 @dataclass
@@ -68,4 +68,5 @@ async def async_unload_entry(
     hass: HomeAssistant, entry: SolityBleConfigEntry
 ) -> bool:
     """Unload a config entry."""
+    await entry.runtime_data.client.async_shutdown()
     return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
