@@ -1,7 +1,9 @@
-"""Status + usage-log coordinator for Solity BLE.
+"""Status coordinator for Solity BLE.
 
-Each poll reads the lock's status (battery, deadbolt, credential counts) and
-its usage log (last open: method, slot, time) in a single BLE connection.
+Periodically reads the lock's status over BLE (battery, deadbolt, credential
+counts, system mode). Each open/close also yields a fresh status frame, which
+the lock entity pushes in here so the sensors update immediately without an
+extra connection.
 """
 from __future__ import annotations
 
@@ -11,13 +13,13 @@ from datetime import timedelta
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
-from .ble import SolityBleClient, SolityBleError, SolityPollData
+from .ble import SolityBleClient, SolityBleError, SolityStatus
 
 _LOGGER = logging.getLogger(__name__)
 
 
-class SolityBleCoordinator(DataUpdateCoordinator[SolityPollData]):
-    """Polls lock status + log over BLE and accepts data pushed from commands."""
+class SolityBleCoordinator(DataUpdateCoordinator[SolityStatus | None]):
+    """Polls lock status over BLE and accepts status pushed from commands."""
 
     def __init__(
         self,
@@ -34,29 +36,18 @@ class SolityBleCoordinator(DataUpdateCoordinator[SolityPollData]):
         )
         self.client = client
 
-    async def _async_update_data(self) -> SolityPollData:
+    async def _async_update_data(self) -> SolityStatus | None:
         try:
-            data = await self.client.async_poll()
+            status = await self.client.async_read_status()
         except SolityBleError as err:
             raise UpdateFailed(str(err)) from err
-        # Keep the last known values for anything this poll didn't return.
-        prev = self.data
-        if prev is not None:
-            if data.status is None:
-                data.status = prev.status
-            if data.last_open is None:
-                data.last_open = prev.last_open
-        return data
+        if status is None:
+            # Connected/authed but no status frame arrived; keep last data.
+            return self.data
+        return status
 
     @callback
-    def apply_poll(self, data: SolityPollData | None) -> None:
-        """Merge data captured during an open/close command."""
-        if data is None:
-            return
-        prev = self.data
-        if prev is not None:
-            if data.status is None:
-                data.status = prev.status
-            if data.last_open is None:
-                data.last_open = prev.last_open
-        self.async_set_updated_data(data)
+    def apply_status(self, status: SolityStatus | None) -> None:
+        """Push a status captured during an open/close command."""
+        if status is not None:
+            self.async_set_updated_data(status)
