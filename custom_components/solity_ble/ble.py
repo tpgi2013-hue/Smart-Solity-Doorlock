@@ -208,6 +208,7 @@ class SolityBleClient:
         def _note(frame: bytes) -> None:
             nonlocal status
             if len(frame) >= 3 and frame[0] == STX and frame[2] == ACK_STATUS:
+                _LOGGER.debug("Solity BLE 0xD1 status frame: %s", frame.hex())
                 status = _parse_status(frame[3 : 3 + (frame[1] - 1)])
 
         client = await establish_connection(
