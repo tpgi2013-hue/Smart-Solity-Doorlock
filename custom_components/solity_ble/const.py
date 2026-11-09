@@ -5,10 +5,17 @@ DOMAIN = "solity_ble"
 CONF_NAME = "name"
 CONF_MAC = "mac"
 CONF_APP_KEY = "app_key"
+CONF_STATUS_MINUTES = "status_minutes"
+
+# How often to read lock status over BLE (battery, deadbolt, counts).
+# 0 disables periodic polling (status then updates only on open/close).
+DEFAULT_STATUS_MINUTES = 30
+MIN_STATUS_MINUTES = 0
+MAX_STATUS_MINUTES = 1440
 
 # How long to show 'unlocked' after a BLE open before assuming the deadbolt
-# auto-relocked (there is no state feedback over BLE). Matches the open
-# command's auto-relock window (second = 7) plus a small margin.
+# auto-relocked, when no status frame confirms the real state. Matches the
+# open command's auto-relock window (second = 7) plus a small margin.
 OPTIMISTIC_UNLOCK_SECONDS = 9
 
 MANUFACTURER = "SOLITY"

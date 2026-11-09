@@ -6,10 +6,25 @@ from typing import Any
 
 import voluptuous as vol
 
-from homeassistant.config_entries import ConfigFlow, ConfigFlowResult
+from homeassistant.config_entries import (
+    ConfigEntry,
+    ConfigFlow,
+    ConfigFlowResult,
+    OptionsFlow,
+)
+from homeassistant.core import callback
 
 from .ble import SolityBleError, parse_app_key
-from .const import CONF_APP_KEY, CONF_MAC, CONF_NAME, DOMAIN
+from .const import (
+    CONF_APP_KEY,
+    CONF_MAC,
+    CONF_NAME,
+    CONF_STATUS_MINUTES,
+    DEFAULT_STATUS_MINUTES,
+    DOMAIN,
+    MAX_STATUS_MINUTES,
+    MIN_STATUS_MINUTES,
+)
 
 _MAC_RE = re.compile(r"^[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}$")
 
@@ -57,4 +72,34 @@ class SolityBleConfigFlow(ConfigFlow, domain=DOMAIN):
             step_id="user",
             data_schema=self.add_suggested_values_to_schema(USER_SCHEMA, user_input),
             errors=errors,
+        )
+
+    @staticmethod
+    @callback
+    def async_get_options_flow(config_entry: ConfigEntry) -> OptionsFlow:
+        return SolityBleOptionsFlow()
+
+
+class SolityBleOptionsFlow(OptionsFlow):
+    """Options: how often to read lock status over BLE."""
+
+    async def async_step_init(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        if user_input is not None:
+            return self.async_create_entry(title="", data=user_input)
+
+        current = self.config_entry.options.get(
+            CONF_STATUS_MINUTES, DEFAULT_STATUS_MINUTES
+        )
+        return self.async_show_form(
+            step_id="init",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(CONF_STATUS_MINUTES, default=current): vol.All(
+                        vol.Coerce(int),
+                        vol.Range(min=MIN_STATUS_MINUTES, max=MAX_STATUS_MINUTES),
+                    ),
+                }
+            ),
         )

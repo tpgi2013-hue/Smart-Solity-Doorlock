@@ -9,16 +9,22 @@ proxy mesh, bypassing the cloud entirely:
     0x11 AUTH_APP   (AES-128-CBC)   -> lock replies 0x91, result 0 = authed
     0x21 OPEN / 0x22 CLOSE (AES-CBC)-> lock replies 0xA1 / 0xA2, result 0 = done
 
+Right after auth the lock pushes a 0xD1 status frame (deadbolt, sub-latch,
+battery, registered-credential counts, system mode). Every BLE session
+captures it, so open/close/status all return a fresh ``SolityStatus``.
+
 Frame: ``48 <len> <cmd> <data...> <checksum>`` with ``len = len(data)+1`` and
 ``checksum = (len + cmd + sum(data)) & 0xFF``. The AES key is fixed across
 (non-China) locks; the per-lock secret is ``appKey`` — the owner account's
-``regDeviceAppKey`` (base64), supplied via the config entry.
+``regDeviceAppKey`` (base64).
 """
 from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import logging
+from dataclasses import dataclass, field
 from datetime import datetime
 
 from bleak.backends.characteristic import BleakGATTCharacteristic
@@ -47,6 +53,7 @@ ACK_EXCHANGE_KEY = 0x90
 ACK_AUTH_APP = 0x91
 ACK_OPEN = 0xA1
 ACK_CLOSE = 0xA2
+ACK_STATUS = 0xD1  # unsolicited status pushed after auth
 ACK_ERROR = 0xFF
 
 # Standard manual-open parameters (app clickStateIcon, BLE path):
@@ -57,17 +64,65 @@ CLOSE_SUFFIX = bytes()
 CONNECT_ATTEMPTS = 4
 RECV_TIMEOUT = 6.0
 CMD_RECV_TIMEOUT = 8.0
+STATUS_DRAIN_TIMEOUT = 2.5
 
 
 class SolityBleError(Exception):
     """A BLE command failed."""
 
 
+@dataclass
+class SolityStatus:
+    """Parsed 0xD1 door-lock status frame."""
+
+    deadbolt: int | None = None
+    sub_latch: int | None = None
+    battery: int | None = None
+    pw_info: int | None = None
+    count_card: int | None = None
+    count_remote: int | None = None
+    count_fingerprint: int | None = None
+    count_mastercard: int | None = None
+    system_mode: int | None = None
+    count_face: int | None = None
+    count_vein: int | None = None
+    user_pw_info: bytes = field(default=b"")
+
+    @property
+    def is_locked(self) -> bool | None:
+        """Real deadbolt state (1 = thrown/locked, 0 = retracted)."""
+        if self.deadbolt is None:
+            return None
+        return self.deadbolt == 1
+
+
+def _parse_status(data: bytes) -> SolityStatus:
+    """Decode a DoorLockStatus payload (byte layout from the Solity app)."""
+
+    def g(i: int) -> int | None:
+        return data[i] if i < len(data) else None
+
+    return SolityStatus(
+        deadbolt=g(0),
+        sub_latch=g(1),
+        battery=g(2),
+        pw_info=g(3),
+        count_card=g(4),
+        count_remote=g(5),
+        count_fingerprint=g(6),
+        count_mastercard=g(7),
+        system_mode=g(8),
+        count_face=g(9),
+        count_vein=g(10),
+        user_pw_info=bytes(data[11:]) if len(data) > 11 else b"",
+    )
+
+
 def parse_app_key(raw: str) -> bytes:
     """Decode the base64 ``regDeviceAppKey`` into its key bytes."""
     try:
         key = base64.b64decode(raw, validate=True)
-    except (ValueError, Exception) as err:  # noqa: BLE001
+    except Exception as err:  # noqa: BLE001
         raise SolityBleError(f"appKey is not valid base64: {err}") from err
     if len(key) < 8:
         raise SolityBleError(f"appKey too short ({len(key)} bytes, need >= 8)")
@@ -105,7 +160,7 @@ def _decrypt(data: bytes, iv: bytes) -> bytes:
 
 
 class SolityBleClient:
-    """Sends OPEN / CLOSE to one lock over BLE via the HA proxy mesh."""
+    """Sends OPEN / CLOSE / status reads to one lock over BLE via the proxy mesh."""
 
     def __init__(self, hass: HomeAssistant, mac: str, app_key: bytes) -> None:
         self.hass = hass
@@ -113,20 +168,27 @@ class SolityBleClient:
         self.app_key = app_key
         self._lock = asyncio.Lock()
 
-    async def async_open(self) -> None:
-        """Retract the deadbolt. Raises SolityBleError on failure."""
-        await self._run(CMD_OPEN, OPEN_SUFFIX, ACK_OPEN)
+    async def async_open(self) -> SolityStatus | None:
+        """Retract the deadbolt. Returns the status captured this session."""
+        return await self._run(CMD_OPEN, OPEN_SUFFIX, ACK_OPEN)
 
-    async def async_close(self) -> None:
-        """Throw the deadbolt. Raises SolityBleError on failure."""
-        await self._run(CMD_CLOSE, CLOSE_SUFFIX, ACK_CLOSE)
+    async def async_close(self) -> SolityStatus | None:
+        """Throw the deadbolt. Returns the status captured this session."""
+        return await self._run(CMD_CLOSE, CLOSE_SUFFIX, ACK_CLOSE)
 
-    async def _run(self, cmd: int, suffix: bytes, ack: int) -> None:
-        # One BLE session at a time per lock.
-        async with self._lock:
-            await self._handshake_and_command(cmd, suffix, ack)
+    async def async_read_status(self) -> SolityStatus | None:
+        """Connect, authenticate, and capture the pushed status frame."""
+        return await self._run(None, None, None)
 
-    async def _handshake_and_command(self, cmd: int, suffix: bytes, ack: int) -> None:
+    async def _run(
+        self, cmd: int | None, suffix: bytes | None, ack: int | None
+    ) -> SolityStatus | None:
+        async with self._lock:  # one BLE session at a time per lock
+            return await self._session(cmd, suffix, ack)
+
+    async def _session(
+        self, cmd: int | None, suffix: bytes | None, ack: int | None
+    ) -> SolityStatus | None:
         ble_device = bluetooth.async_ble_device_from_address(
             self.hass, self.mac, connectable=True
         )
@@ -139,6 +201,13 @@ class SolityBleClient:
 
         def _on_notify(_char: BleakGATTCharacteristic, data: bytearray) -> None:
             queue.put_nowait(bytes(data))
+
+        status: SolityStatus | None = None
+
+        def _note(frame: bytes) -> None:
+            nonlocal status
+            if len(frame) >= 3 and frame[0] == STX and frame[2] == ACK_STATUS:
+                status = _parse_status(frame[3 : 3 + (frame[1] - 1)])
 
         client = await establish_connection(
             BleakClientWithServiceCache,
@@ -157,6 +226,7 @@ class SolityBleClient:
                         continue
                     if frame[2] == ACK_ERROR:
                         raise SolityBleError("lock reported receive error (0xFF)")
+                    _note(frame)
                     if frame[2] == want:
                         return frame
 
@@ -184,15 +254,31 @@ class SolityBleClient:
             if auth[3] != 0:
                 raise SolityBleError(f"auth rejected (result={auth[3]})")
 
-            # 4) OPEN / CLOSE (encrypted) -> 0xA1 / 0xA2 result 0
-            cmd_data = _time_key() + self.app_key + suffix
-            await client.write_gatt_char(
-                WRITE_UUID, _encrypt(_build(cmd, cmd_data), iv), response=True
-            )
-            done = await _await(ack, iv, CMD_RECV_TIMEOUT)
-            if done[3] != 0:
-                raise SolityBleError(f"command 0x{cmd:02X} rejected (result={done[3]})")
-            _LOGGER.debug("Solity BLE 0x%02X OK (%s)", cmd, self.mac)
+            # 4) optional OPEN / CLOSE (encrypted) -> 0xA1 / 0xA2 result 0
+            if cmd is not None:
+                cmd_data = _time_key() + self.app_key + (suffix or b"")
+                await client.write_gatt_char(
+                    WRITE_UUID, _encrypt(_build(cmd, cmd_data), iv), response=True
+                )
+                done = await _await(ack, iv, CMD_RECV_TIMEOUT)
+                if done[3] != 0:
+                    raise SolityBleError(
+                        f"command 0x{cmd:02X} rejected (result={done[3]})"
+                    )
+
+            # 5) drain remaining frames briefly to capture the pushed 0xD1 status
+            with contextlib.suppress(TimeoutError):
+                while True:
+                    raw = await asyncio.wait_for(queue.get(), STATUS_DRAIN_TIMEOUT)
+                    frame = _decrypt(raw, iv)
+                    if len(frame) >= 3 and frame[0] == STX:
+                        if frame[2] == ACK_ERROR:
+                            continue
+                        _note(frame)
+
+            if cmd is not None:
+                _LOGGER.debug("Solity BLE 0x%02X OK (%s)", cmd, self.mac)
+            return status
         except TimeoutError as err:
             raise SolityBleError("timed out waiting for lock response") from err
         except SolityBleError:
