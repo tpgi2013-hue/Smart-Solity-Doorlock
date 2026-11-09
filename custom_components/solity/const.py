@@ -12,6 +12,14 @@ CONF_DEVICE_ID = "device_id"
 CONF_API_DEVICE_ID = "api_device_id"
 CONF_NICKNAME = "nickname"
 
+# Direct BLE unlock (optional). The lock's Bluetooth-pack MAC and the per-lock
+# secret (the owner account's regDeviceAppKey, base64). When both are set the
+# lock opens over BLE via the HA Bluetooth proxy mesh, with the cloud open as
+# a fallback. The HA (invited member) account does not expose regDeviceAppKey,
+# so it is entered here once, taken from the owner account.
+CONF_BLE_MAC = "ble_mac"
+CONF_BLE_APP_KEY = "ble_app_key"
+
 # Event-log poll (fast, seconds) — detects external open/close/fingerprint.
 CONF_LOG_SECONDS = "log_seconds"
 DEFAULT_LOG_SECONDS = 10

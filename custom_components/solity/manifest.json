@@ -3,10 +3,11 @@
   "name": "Smart Solity Doorlock",
   "codeowners": [],
   "config_flow": true,
+  "dependencies": ["bluetooth_adapters"],
   "documentation": "https://github.com/tpgi2013-hue/Smart-Solity-Doorlock",
   "integration_type": "device",
   "iot_class": "cloud_polling",
   "issue_tracker": "https://github.com/tpgi2013-hue/Smart-Solity-Doorlock/issues",
-  "requirements": [],
-  "version": "1.7.6"
+  "requirements": ["bleak-retry-connector>=3.5.0"],
+  "version": "1.8.0"
 }

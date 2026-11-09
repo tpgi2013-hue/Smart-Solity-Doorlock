@@ -12,8 +12,11 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.storage import Store
 
 from .api import SolityClient
+from .ble import SolityBleClient, SolityBleError, parse_app_key
 from .const import (
     CONF_API_DEVICE_ID,
+    CONF_BLE_APP_KEY,
+    CONF_BLE_MAC,
     CONF_DEVICE_ID,
     CONF_EMAIL,
     CONF_HASHED_PWD,
@@ -30,6 +33,10 @@ from .const import (
 )
 from .coordinator import SolityLogCoordinator, SolityStatusCoordinator
 
+import logging
+
+_LOGGER = logging.getLogger(__name__)
+
 PLATFORMS: list[Platform] = [
     Platform.LOCK,
     Platform.SENSOR,
@@ -39,10 +46,29 @@ PLATFORMS: list[Platform] = [
 
 @dataclass
 class SolityData:
-    """Runtime data: the two coordinators sharing one API client."""
+    """Runtime data: the two coordinators sharing one API client, plus the
+    optional direct-BLE unlock client."""
 
     status: SolityStatusCoordinator
     log: SolityLogCoordinator
+    ble: SolityBleClient | None = None
+
+
+def _build_ble_client(
+    hass: HomeAssistant, entry: SolityConfigEntry
+) -> SolityBleClient | None:
+    """Create the BLE unlock client if both MAC and appKey options are set."""
+    mac = (entry.options.get(CONF_BLE_MAC) or "").strip()
+    app_key_b64 = (entry.options.get(CONF_BLE_APP_KEY) or "").strip()
+    if not mac or not app_key_b64:
+        return None
+    try:
+        app_key = parse_app_key(app_key_b64)
+    except SolityBleError as err:
+        _LOGGER.warning("Smart Solity: invalid BLE appKey, BLE disabled: %s", err)
+        return None
+    _LOGGER.info("Smart Solity: direct BLE unlock enabled for %s", mac.upper())
+    return SolityBleClient(hass, mac, app_key)
 
 
 type SolityConfigEntry = ConfigEntry[SolityData]
@@ -129,7 +155,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: SolityConfigEntry) -> bo
     await status.async_config_entry_first_refresh()
     await log.async_config_entry_first_refresh()
 
-    entry.runtime_data = SolityData(status=status, log=log)
+    entry.runtime_data = SolityData(
+        status=status, log=log, ble=_build_ble_client(hass, entry)
+    )
     # New open in the event log -> invalidate cached deadbolt + verify it.
     entry.async_on_unload(status.attach_log(log))
     entry.async_on_unload(entry.add_update_listener(_async_update_listener))

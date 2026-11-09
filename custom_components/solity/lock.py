@@ -7,6 +7,7 @@ lock, paced by the door state, until the deadbolt reads locked again.
 """
 from __future__ import annotations
 
+import logging
 import time
 from typing import Any
 
@@ -19,8 +20,11 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from . import SolityConfigEntry
 from .api import SolityError
+from .ble import SolityBleClient, SolityBleError
 from .const import CONF_DEVICE_ID, CONF_NICKNAME, DOMAIN, MANUFACTURER, MODEL
 from .coordinator import SolityStatusCoordinator
+
+_LOGGER = logging.getLogger(__name__)
 
 
 async def async_setup_entry(
@@ -43,6 +47,7 @@ class SolityLock(CoordinatorEntity[SolityStatusCoordinator], LockEntity):
         self, coordinator: SolityStatusCoordinator, entry: SolityConfigEntry
     ) -> None:
         super().__init__(coordinator)
+        self._ble: SolityBleClient | None = entry.runtime_data.ble
         device_id = entry.data[CONF_DEVICE_ID]
         self._attr_unique_id = f"{device_id}_lock"
         self._attr_device_info = DeviceInfo(
@@ -102,13 +107,53 @@ class SolityLock(CoordinatorEntity[SolityStatusCoordinator], LockEntity):
                 translation_placeholders={"error": str(err)},
             ) from err
 
+    async def _unlock_command(self) -> None:
+        """Open the lock: try direct BLE first (fast, local), cloud as fallback.
+
+        BLE and the cloud open share one command() guard so a BLE failure that
+        falls through to the cloud does not re-enter it.
+        """
+        async with self.coordinator.command():
+            if self._ble is not None:
+                started = time.monotonic()
+                try:
+                    await self._ble.async_open()
+                    self.coordinator.record_command(
+                        "unlock(ble)", time.monotonic() - started
+                    )
+                    return
+                except SolityBleError as err:
+                    self.coordinator.record_command(
+                        "unlock(ble-fail)", time.monotonic() - started
+                    )
+                    _LOGGER.warning(
+                        "Solity BLE open failed (%s); falling back to cloud", err
+                    )
+
+            client = self.coordinator.client
+            started = time.monotonic()
+            try:
+                await client.open(self.coordinator.device_id)
+            except SolityError as err:
+                self.coordinator.record_command(
+                    "unlock(cloud-fail)", time.monotonic() - started
+                )
+                raise HomeAssistantError(
+                    translation_domain=DOMAIN,
+                    translation_key="unlock_failed",
+                    translation_placeholders={"error": str(err)},
+                ) from err
+            self.coordinator.record_command(
+                "unlock(cloud)", time.monotonic() - started
+            )
+
     async def async_lock(self, **kwargs: Any) -> None:
         await self._command("lock")
         self.coordinator.cancel_unlock_grace()
         self.coordinator.start_verify()
 
     async def async_unlock(self, **kwargs: Any) -> None:
-        await self._command("unlock")
+        await self._unlock_command()
         self.coordinator.mark_unlocked(from_ha=True)
         self.coordinator.start_verify(after_ha_unlock=True)
 

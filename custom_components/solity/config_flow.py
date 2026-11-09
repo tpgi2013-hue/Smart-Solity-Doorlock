@@ -18,6 +18,8 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from .api import SolityAuthError, SolityClient, SolityError, hash_password
 from .const import (
     CONF_API_DEVICE_ID,
+    CONF_BLE_APP_KEY,
+    CONF_BLE_MAC,
     CONF_DEVICE_ID,
     CONF_EMAIL,
     CONF_HASHED_PWD,
@@ -214,11 +216,17 @@ class SolityOptionsFlow(OptionsFlow):
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         if user_input is not None:
-            return self.async_create_entry(title="", data=user_input)
+            # Normalise the optional BLE fields; blank = disabled.
+            cleaned = dict(user_input)
+            cleaned[CONF_BLE_MAC] = (user_input.get(CONF_BLE_MAC) or "").strip().upper()
+            cleaned[CONF_BLE_APP_KEY] = (user_input.get(CONF_BLE_APP_KEY) or "").strip()
+            return self.async_create_entry(title="", data=cleaned)
 
         opts = self.config_entry.options
         log_default = opts.get(CONF_LOG_SECONDS, DEFAULT_LOG_SECONDS)
         status_default = opts.get(CONF_STATUS_MINUTES, DEFAULT_STATUS_MINUTES)
+        ble_mac_default = opts.get(CONF_BLE_MAC, "")
+        ble_key_default = opts.get(CONF_BLE_APP_KEY, "")
         return self.async_show_form(
             step_id="init",
             data_schema=vol.Schema(
@@ -231,6 +239,8 @@ class SolityOptionsFlow(OptionsFlow):
                         vol.Coerce(int),
                         vol.Range(min=MIN_STATUS_MINUTES, max=MAX_STATUS_MINUTES),
                     ),
+                    vol.Optional(CONF_BLE_MAC, default=ble_mac_default): str,
+                    vol.Optional(CONF_BLE_APP_KEY, default=ble_key_default): str,
                 }
             ),
         )
