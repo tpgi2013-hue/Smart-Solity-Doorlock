@@ -53,3 +53,6 @@ for key, val in cc.items():
                     "memberIdx": it.get("memberIdx"),
                     "memberId": it.get("myDeviceMemberId"),
                 }, ensure_ascii=False))
+
+print("CONTENTS_KEYS", list(cc.keys()))
+print("RAW", json.dumps(cc, ensure_ascii=False)[:2500])
