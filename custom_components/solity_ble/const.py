@@ -23,4 +23,4 @@ MODEL = "WELKOM (BLE)"
 
 # How long a prewarmed (connected + authenticated) BLE session is held open
 # waiting for a command before it is dropped again.
-PREWARM_HOLD_SECONDS = 20
+PREWARM_HOLD_SECONDS = 10
