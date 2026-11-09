@@ -50,12 +50,29 @@ CMD_AUTH_APP = 0x11
 CMD_OPEN = 0x21
 CMD_CLOSE = 0x22
 CMD_STATUS_REQ = 0x51  # ask the lock for its status
+CMD_LOG_REQ = 0x5D  # ask the lock for its saved usage log
 ACK_EXCHANGE_KEY = 0x90
 ACK_AUTH_APP = 0x91
 ACK_OPEN = 0xA1
 ACK_CLOSE = 0xA2
 ACK_STATUS = 0xD1  # status reply (to 0x51), carries the DoorLockStatus payload
+ACK_LOG = 0xDD  # log reply (to 0x5D), carries the usage-log entries
 ACK_ERROR = 0xFF
+
+# Log entry event type (byte +6)
+EVENT_OPEN = 0x53
+EVENT_CLOSE = 0x54
+EVENT_ETC = 0x55
+
+# How a logged open/close was made (mediaType, byte +7)
+MEDIA_NAMES = {
+    1: "비밀번호",
+    5: "카드",
+    7: "원격",
+    8: "지문",
+    11: "스마트오픈",
+    32: "실내",
+}
 
 # Standard manual-open parameters (app clickStateIcon, BLE path):
 #   code = 0, address = 0, second = 7
@@ -119,6 +136,72 @@ def _parse_status(data: bytes) -> SolityStatus:
     )
 
 
+@dataclass
+class SolityLogEntry:
+    """One usage-log entry (10 bytes) from the 0xDD log frame."""
+
+    dt: str  # "YYYY-MM-DD HH:MM:SS"
+    event: int  # 0x53 open / 0x54 close / 0x55 etc
+    media_type: int | None  # how it was opened (see MEDIA_NAMES)
+    number: int | None  # which credential slot (e.g. fingerprint #3)
+    battery: int | None
+
+    @property
+    def is_open(self) -> bool:
+        return self.event == EVENT_OPEN
+
+    @property
+    def media_name(self) -> str:
+        if self.media_type is None:
+            return ""
+        return MEDIA_NAMES.get(self.media_type, f"방법{self.media_type}")
+
+    @property
+    def summary(self) -> str:
+        """e.g. '지문 3번', '실내', '원격'."""
+        name = self.media_name
+        if self.is_open and self.number:
+            return f"{name} {self.number}번"
+        return name or ("열림" if self.is_open else "닫힘")
+
+
+@dataclass
+class SolityPollData:
+    """Combined result of a status + log poll."""
+
+    status: SolityStatus | None = None
+    last_open: SolityLogEntry | None = None
+
+
+def _parse_log(data: bytes) -> list[SolityLogEntry]:
+    """Decode the 0xDD usage-log payload into entries (10 bytes each)."""
+    if len(data) < 2:
+        return []
+    send_cnt = data[1]
+    entries: list[SolityLogEntry] = []
+    off = 2
+    for _ in range(send_cnt):
+        if off + 10 > len(data):
+            break
+        e = data[off : off + 10]
+        dt = (
+            f"20{e[0]:02d}-{e[1]:02d}-{e[2]:02d} "
+            f"{e[3]:02d}:{e[4]:02d}:{e[5]:02d}"
+        )
+        entries.append(
+            SolityLogEntry(
+                dt=dt, event=e[6], media_type=e[7], number=e[8], battery=e[9]
+            )
+        )
+        off += 10
+    return entries
+
+
+def _latest_open(entries: list[SolityLogEntry]) -> SolityLogEntry | None:
+    opens = [e for e in entries if e.is_open]
+    return max(opens, key=lambda e: e.dt) if opens else None
+
+
 def parse_app_key(raw: str) -> bytes:
     """Decode the base64 ``regDeviceAppKey`` into its key bytes."""
     try:
@@ -169,27 +252,37 @@ class SolityBleClient:
         self.app_key = app_key
         self._lock = asyncio.Lock()
 
-    async def async_open(self) -> SolityStatus | None:
-        """Retract the deadbolt. Returns the status captured this session."""
+    async def async_open(self) -> SolityPollData:
+        """Retract the deadbolt."""
         return await self._run(CMD_OPEN, OPEN_SUFFIX, ACK_OPEN)
 
-    async def async_close(self) -> SolityStatus | None:
-        """Throw the deadbolt. Returns the status captured this session."""
+    async def async_close(self) -> SolityPollData:
+        """Throw the deadbolt."""
         return await self._run(CMD_CLOSE, CLOSE_SUFFIX, ACK_CLOSE)
 
-    async def async_read_status(self) -> SolityStatus | None:
-        """Connect, authenticate, request status (0x51), and parse 0xD1."""
-        return await self._run(CMD_STATUS_REQ, b"", ACK_STATUS)
+    async def async_poll(self) -> SolityPollData:
+        """Connect, authenticate, read status (0x51) and usage log (0x5D)."""
+        return await self._run(None, None, None, req_status=True, req_log=True)
 
     async def _run(
-        self, cmd: int | None, suffix: bytes | None, ack: int | None
-    ) -> SolityStatus | None:
+        self,
+        cmd: int | None,
+        suffix: bytes | None,
+        ack: int | None,
+        req_status: bool = False,
+        req_log: bool = False,
+    ) -> SolityPollData:
         async with self._lock:  # one BLE session at a time per lock
-            return await self._session(cmd, suffix, ack)
+            return await self._session(cmd, suffix, ack, req_status, req_log)
 
     async def _session(
-        self, cmd: int | None, suffix: bytes | None, ack: int | None
-    ) -> SolityStatus | None:
+        self,
+        cmd: int | None,
+        suffix: bytes | None,
+        ack: int | None,
+        req_status: bool,
+        req_log: bool,
+    ) -> SolityPollData:
         ble_device = bluetooth.async_ble_device_from_address(
             self.hass, self.mac, connectable=True
         )
@@ -203,13 +296,18 @@ class SolityBleClient:
         def _on_notify(_char: BleakGATTCharacteristic, data: bytearray) -> None:
             queue.put_nowait(bytes(data))
 
-        status: SolityStatus | None = None
+        result = SolityPollData()
 
         def _note(frame: bytes) -> None:
-            nonlocal status
-            if len(frame) >= 3 and frame[0] == STX and frame[2] == ACK_STATUS:
-                _LOGGER.debug("Solity BLE 0xD1 status frame: %s", frame.hex())
-                status = _parse_status(frame[3 : 3 + (frame[1] - 1)])
+            if len(frame) < 3 or frame[0] != STX:
+                return
+            payload = frame[3 : 3 + (frame[1] - 1)]
+            if frame[2] == ACK_STATUS:
+                _LOGGER.debug("Solity BLE 0xD1 status: %s", frame.hex())
+                result.status = _parse_status(payload)
+            elif frame[2] == ACK_LOG:
+                _LOGGER.debug("Solity BLE 0xDD log: %s", frame.hex())
+                result.last_open = _latest_open(_parse_log(payload))
 
         client = await establish_connection(
             BleakClientWithServiceCache,
@@ -232,6 +330,13 @@ class SolityBleClient:
                     if frame[2] == want:
                         return frame
 
+            async def _send(c: int, extra: bytes) -> None:
+                await client.write_gatt_char(
+                    WRITE_UUID,
+                    _encrypt(_build(c, _time_key() + self.app_key + extra), iv),
+                    response=True,
+                )
+
             # 1) EXCHANGE_KEY (plaintext) -> 0x90 with the receive key
             await client.write_gatt_char(
                 WRITE_UUID,
@@ -247,42 +352,38 @@ class SolityBleClient:
             iv = (bytes(self.app_key[:8]) + bytes(receive_key[:8]) + bytes(16))[:16]
 
             # 3) AUTH_APP (encrypted) -> 0x91 result 0
-            await client.write_gatt_char(
-                WRITE_UUID,
-                _encrypt(_build(CMD_AUTH_APP, _time_key() + self.app_key), iv),
-                response=True,
-            )
+            await _send(CMD_AUTH_APP, b"")
             auth = await _await(ACK_AUTH_APP, iv, RECV_TIMEOUT)
             if auth[3] != 0:
                 raise SolityBleError(f"auth rejected (result={auth[3]})")
 
             # 4) optional OPEN / CLOSE (encrypted) -> 0xA1 / 0xA2 result 0
             if cmd is not None:
-                cmd_data = _time_key() + self.app_key + (suffix or b"")
-                await client.write_gatt_char(
-                    WRITE_UUID, _encrypt(_build(cmd, cmd_data), iv), response=True
-                )
+                await _send(cmd, suffix or b"")
                 done = await _await(ack, iv, CMD_RECV_TIMEOUT)
-                # OPEN/CLOSE reply with a result byte; the 0xD1 status reply
-                # is the payload itself (captured by _note), not a result.
                 if cmd in (CMD_OPEN, CMD_CLOSE) and done[3] != 0:
                     raise SolityBleError(
                         f"command 0x{cmd:02X} rejected (result={done[3]})"
                     )
+                _LOGGER.debug("Solity BLE 0x%02X OK (%s)", cmd, self.mac)
 
-            # 5) drain remaining frames briefly to capture the pushed 0xD1 status
+            # 5) status (0x51 -> 0xD1) and usage log (0x5D -> 0xDD)
+            if req_status:
+                await _send(CMD_STATUS_REQ, b"")
+                await _await(ACK_STATUS, iv, CMD_RECV_TIMEOUT)
+            if req_log:
+                await _send(CMD_LOG_REQ, b"")
+                await _await(ACK_LOG, iv, CMD_RECV_TIMEOUT)
+
+            # 6) drain any trailing frames briefly
             with contextlib.suppress(TimeoutError):
                 while True:
                     raw = await asyncio.wait_for(queue.get(), STATUS_DRAIN_TIMEOUT)
                     frame = _decrypt(raw, iv)
-                    if len(frame) >= 3 and frame[0] == STX:
-                        if frame[2] == ACK_ERROR:
-                            continue
+                    if len(frame) >= 3 and frame[0] == STX and frame[2] != ACK_ERROR:
                         _note(frame)
 
-            if cmd is not None:
-                _LOGGER.debug("Solity BLE 0x%02X OK (%s)", cmd, self.mac)
-            return status
+            return result
         except TimeoutError as err:
             raise SolityBleError("timed out waiting for lock response") from err
         except SolityBleError:

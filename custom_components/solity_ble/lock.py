@@ -75,8 +75,9 @@ class SolityBleLock(CoordinatorEntity[SolityBleCoordinator], LockEntity):
         if self._optimistic_unlocked:
             return False
         data = self.coordinator.data
-        if data is not None and data.is_locked is not None:
-            return data.is_locked
+        if data is not None and data.status is not None:
+            if data.status.is_locked is not None:
+                return data.status.is_locked
         return True  # assume locked until a status read says otherwise
 
     @callback
@@ -88,14 +89,14 @@ class SolityBleLock(CoordinatorEntity[SolityBleCoordinator], LockEntity):
     async def async_unlock(self, **kwargs: Any) -> None:
         """Retract the deadbolt over BLE (optimistic until auto-relock)."""
         try:
-            status = await self._client.async_open()
+            poll = await self._client.async_open()
         except SolityBleError as err:
             _LOGGER.warning("Solity BLE open failed: %s", err)
             raise HomeAssistantError(f"BLE 열림 실패: {err}") from err
 
-        # The captured status predates the open (battery/counts valid), so keep
-        # it for the sensors but show 'unlocked' optimistically for the window.
-        self.coordinator.apply_status(status)
+        # Show 'unlocked' optimistically for the auto-relock window; the timer
+        # then triggers a full poll that reads the real state + fresh log.
+        self.coordinator.apply_poll(poll)
         self._clear_relock()
         self._optimistic_unlocked = True
         self.async_write_ha_state()
@@ -117,13 +118,13 @@ class SolityBleLock(CoordinatorEntity[SolityBleCoordinator], LockEntity):
     async def async_lock(self, **kwargs: Any) -> None:
         """Throw the deadbolt over BLE."""
         try:
-            status = await self._client.async_close()
+            poll = await self._client.async_close()
         except SolityBleError as err:
             _LOGGER.warning("Solity BLE close failed: %s", err)
             raise HomeAssistantError(f"BLE 잠금 실패: {err}") from err
         self._clear_relock()
         self._optimistic_unlocked = False
-        self.coordinator.apply_status(status)
+        self.coordinator.apply_poll(poll)
         self.async_write_ha_state()
 
     @callback

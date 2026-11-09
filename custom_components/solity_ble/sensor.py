@@ -171,6 +171,6 @@ class SolityBleSensor(CoordinatorEntity[SolityBleCoordinator], SensorEntity):
     @property
     def native_value(self) -> int | None:
         data = self.coordinator.data
-        if data is None:
+        if data is None or data.status is None:
             return None
-        return self.entity_description.value_fn(data)
+        return self.entity_description.value_fn(data.status)
