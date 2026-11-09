@@ -1,0 +1,22 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Solity Doorlock (BLE)",
+        "description": "Open a Solity lock directly over Bluetooth (through HA's Bluetooth proxies), independent of the cloud.",
+        "data": {
+          "name": "Name",
+          "mac": "Bluetooth MAC (e.g. 2C:02:9F:52:6B:43)",
+          "app_key": "App key (regDeviceAppKey, base64)"
+        }
+      }
+    },
+    "error": {
+      "invalid_mac": "Not a valid Bluetooth MAC address (format AA:BB:CC:DD:EE:FF).",
+      "invalid_app_key": "Not a valid base64 app key."
+    },
+    "abort": {
+      "already_configured": "This lock is already configured."
+    }
+  }
+}
