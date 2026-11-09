@@ -49,11 +49,12 @@ CMD_EXCHANGE_KEY = 0x10
 CMD_AUTH_APP = 0x11
 CMD_OPEN = 0x21
 CMD_CLOSE = 0x22
+CMD_STATUS_REQ = 0x51  # ask the lock for its status
 ACK_EXCHANGE_KEY = 0x90
 ACK_AUTH_APP = 0x91
 ACK_OPEN = 0xA1
 ACK_CLOSE = 0xA2
-ACK_STATUS = 0xD1  # unsolicited status pushed after auth
+ACK_STATUS = 0xD1  # status reply (to 0x51), carries the DoorLockStatus payload
 ACK_ERROR = 0xFF
 
 # Standard manual-open parameters (app clickStateIcon, BLE path):
@@ -177,8 +178,8 @@ class SolityBleClient:
         return await self._run(CMD_CLOSE, CLOSE_SUFFIX, ACK_CLOSE)
 
     async def async_read_status(self) -> SolityStatus | None:
-        """Connect, authenticate, and capture the pushed status frame."""
-        return await self._run(None, None, None)
+        """Connect, authenticate, request status (0x51), and parse 0xD1."""
+        return await self._run(CMD_STATUS_REQ, b"", ACK_STATUS)
 
     async def _run(
         self, cmd: int | None, suffix: bytes | None, ack: int | None
@@ -261,7 +262,9 @@ class SolityBleClient:
                     WRITE_UUID, _encrypt(_build(cmd, cmd_data), iv), response=True
                 )
                 done = await _await(ack, iv, CMD_RECV_TIMEOUT)
-                if done[3] != 0:
+                # OPEN/CLOSE reply with a result byte; the 0xD1 status reply
+                # is the payload itself (captured by _note), not a result.
+                if cmd in (CMD_OPEN, CMD_CLOSE) and done[3] != 0:
                     raise SolityBleError(
                         f"command 0x{cmd:02X} rejected (result={done[3]})"
                     )
