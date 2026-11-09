@@ -58,6 +58,20 @@ class SolityLock(CoordinatorEntity[SolityStatusCoordinator], LockEntity):
         )
 
     @property
+    def available(self) -> bool:
+        """Availability.
+
+        With the direct-BLE path configured the lock can still be opened over
+        BLE when the cloud status poll is failing (a stuck WiFi+ module, the
+        very case BLE exists for). Keep the entity available for commands then,
+        even though the deadbolt *state* below may be unknown/stale. Without
+        BLE, fall back to the cloud coordinator's availability.
+        """
+        if self._ble is not None:
+            return True
+        return super().available
+
+    @property
     def is_locked(self) -> bool | None:
         """Real deadbolt state (1 = locked)."""
         return self.coordinator.is_locked
