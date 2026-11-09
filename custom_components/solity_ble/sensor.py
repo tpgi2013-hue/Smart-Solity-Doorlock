@@ -4,13 +4,18 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 
+from homeassistant.components.bluetooth import async_last_service_info
 from homeassistant.components.sensor import (
     SensorDeviceClass,
     SensorEntity,
     SensorEntityDescription,
     SensorStateClass,
 )
-from homeassistant.const import PERCENTAGE, EntityCategory
+from homeassistant.const import (
+    PERCENTAGE,
+    SIGNAL_STRENGTH_DECIBELS_MILLIWATT,
+    EntityCategory,
+)
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -47,16 +52,17 @@ SENSORS: tuple[SolityBleSensorDescription, ...] = (
         value_fn=lambda s: s.count_card,
     ),
     SolityBleSensorDescription(
-        key="count_fingerprint",
-        translation_key="count_fingerprint",
-        icon="mdi:fingerprint",
+        key="count_password",
+        translation_key="count_password",
+        icon="mdi:dialpad",
         state_class=SensorStateClass.MEASUREMENT,
         entity_category=EntityCategory.DIAGNOSTIC,
-        value_fn=lambda s: s.count_fingerprint,
+        value_fn=lambda s: s.pw_info,
     ),
-    # No count_face / count_vein: this lock's face reader is the separate FM225
-    # module (ESPHome), so the lock's BLE status never reports those — use the
-    # FM225 entity (sensor.front_door_face_face_count) for registered faces.
+    # No count_fingerprint / count_face / count_vein here: this lock's BLE
+    # status frame reports password and card counts, but not fingerprint, face
+    # or vein (the app reads those from a separate registration-list command).
+    # Use the FM225 entity (sensor.front_door_face_face_count) for faces.
     SolityBleSensorDescription(
         key="count_remote",
         translation_key="count_remote",
@@ -97,9 +103,45 @@ async def async_setup_entry(
 ) -> None:
     """Set up the Solity BLE sensors."""
     coordinator = entry.runtime_data.coordinator
-    async_add_entities(
+    entities: list[SensorEntity] = [
         SolityBleSensor(coordinator, entry, desc) for desc in SENSORS
+    ]
+    entities.append(SolityBleRssiSensor(hass, entry))
+    async_add_entities(entities)
+
+
+def _device_info(entry: SolityBleConfigEntry) -> DeviceInfo:
+    mac = entry.data[CONF_MAC]
+    return DeviceInfo(
+        identifiers={(DOMAIN, mac)},
+        connections={("bluetooth", mac)},
+        name=entry.data.get(CONF_NAME) or "Solity Doorlock (BLE)",
+        manufacturer=MANUFACTURER,
+        model=MODEL,
     )
+
+
+class SolityBleRssiSensor(SensorEntity):
+    """Signal strength of the lock as seen by the HA Bluetooth proxy mesh."""
+
+    _attr_has_entity_name = True
+    _attr_translation_key = "rssi"
+    _attr_device_class = SensorDeviceClass.SIGNAL_STRENGTH
+    _attr_native_unit_of_measurement = SIGNAL_STRENGTH_DECIBELS_MILLIWATT
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(self, hass: HomeAssistant, entry: SolityBleConfigEntry) -> None:
+        self._hass = hass
+        self._mac = entry.data[CONF_MAC]
+        self._attr_unique_id = f"{self._mac}_rssi"
+        self._attr_device_info = _device_info(entry)
+
+    @property
+    def native_value(self) -> int | None:
+        # connectable=False: the strongest advertisement across all proxies.
+        info = async_last_service_info(self._hass, self._mac, connectable=False)
+        return info.rssi if info is not None else None
 
 
 class SolityBleSensor(CoordinatorEntity[SolityBleCoordinator], SensorEntity):

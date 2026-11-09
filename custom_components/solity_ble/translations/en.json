@@ -32,13 +32,12 @@
   "entity": {
     "sensor": {
       "count_card": { "name": "Registered cards" },
-      "count_fingerprint": { "name": "Registered fingerprints" },
-      "count_face": { "name": "Registered faces" },
+      "count_password": { "name": "Registered passwords" },
       "count_remote": { "name": "Registered remotes" },
       "count_mastercard": { "name": "Master cards" },
-      "count_vein": { "name": "Registered veins" },
       "system_mode": { "name": "System mode" },
-      "sub_latch": { "name": "Sub-latch" }
+      "sub_latch": { "name": "Sub-latch" },
+      "rssi": { "name": "Signal strength" }
     }
   }
 }

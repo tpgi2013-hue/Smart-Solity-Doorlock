@@ -31,14 +31,27 @@
   },
   "entity": {
     "sensor": {
-      "count_card": { "name": "등록 카드 수" },
-      "count_fingerprint": { "name": "등록 지문 수" },
-      "count_face": { "name": "등록 얼굴 수" },
-      "count_remote": { "name": "등록 리모컨 수" },
-      "count_mastercard": { "name": "마스터 카드 수" },
-      "count_vein": { "name": "등록 정맥 수" },
-      "system_mode": { "name": "시스템 모드" },
-      "sub_latch": { "name": "보조 래치" }
+      "count_card": {
+        "name": "등록 카드 수"
+      },
+      "count_password": {
+        "name": "등록 비밀번호 수"
+      },
+      "count_remote": {
+        "name": "등록 리모컨 수"
+      },
+      "count_mastercard": {
+        "name": "마스터 카드 수"
+      },
+      "system_mode": {
+        "name": "시스템 모드"
+      },
+      "sub_latch": {
+        "name": "보조 래치"
+      },
+      "rssi": {
+        "name": "신호 세기"
+      }
     }
   }
 }
