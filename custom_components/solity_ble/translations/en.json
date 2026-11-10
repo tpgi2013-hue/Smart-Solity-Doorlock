@@ -53,7 +53,7 @@
         "name": "Signal strength"
       }
     },
-    "button": {
+    "switch": {
       "prewarm": {
         "name": "Prewarm connection"
       }

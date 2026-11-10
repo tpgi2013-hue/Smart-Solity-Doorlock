@@ -24,7 +24,7 @@ from .const import (
 )
 from .coordinator import SolityBleCoordinator
 
-PLATFORMS: list[Platform] = [Platform.BUTTON, Platform.LOCK, Platform.SENSOR]
+PLATFORMS: list[Platform] = [Platform.LOCK, Platform.SENSOR, Platform.SWITCH]
 
 
 @dataclass

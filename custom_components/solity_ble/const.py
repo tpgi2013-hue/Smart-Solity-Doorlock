@@ -21,9 +21,9 @@ OPTIMISTIC_UNLOCK_SECONDS = 9
 MANUFACTURER = "SOLITY"
 MODEL = "WELKOM (BLE)"
 
-# How long a prewarmed (connected + authenticated) BLE session is held open
-# waiting for a command before it is dropped again.
-PREWARM_HOLD_SECONDS = 8
+# Safety cap for a prewarm hold: the session is dropped after this long even
+# if nobody switches the prewarm off (e.g. radar stuck on).
+PREWARM_MAX_SECONDS = 20
 
 # While a status read shows the deadbolt retracted (door just used / left
 # open), re-read this often until it reports locked, at most this many times.

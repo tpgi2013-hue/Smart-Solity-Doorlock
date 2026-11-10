@@ -14,9 +14,9 @@ battery, registered-credential counts, system mode). Every BLE session
 captures it, so open/close/status all return a fresh ``SolityStatus``.
 
 Warm sessions: ``async_prewarm`` connects and authenticates ahead of time and
-holds the session for a short window. A command arriving inside that window
-skips the (slow, ~3 s) connection setup and only pays for the command itself.
-Outside a prewarm window every command connects, runs and disconnects.
+holds the session until ``async_release`` (or a safety cap). A command arriving
+while held skips the connection setup (~1-3 s) and only pays for the command
+itself. Without a hold every command connects, runs and disconnects.
 
 Frame: ``48 <len> <cmd> <data...> <checksum>`` with ``len = len(data)+1`` and
 ``checksum = (len + cmd + sum(data)) & 0xFF``. The AES key is fixed across
@@ -30,6 +30,7 @@ import base64
 import contextlib
 import logging
 from dataclasses import dataclass, field
+from collections.abc import Callable
 from datetime import datetime
 
 from bleak.backends.characteristic import BleakGATTCharacteristic
@@ -191,6 +192,7 @@ class SolityBleClient:
         self._queue: asyncio.Queue[bytes] = asyncio.Queue()
         self._status: SolityStatus | None = None
         self._hold_handle: asyncio.TimerHandle | None = None
+        self._hold_listener: Callable[[], None] | None = None
 
     # ---- public API -----------------------------------------------------
 
@@ -206,11 +208,25 @@ class SolityBleClient:
         """Connect, authenticate, request status (0x51), and parse 0xD1."""
         return await self._run(CMD_STATUS_REQ, b"", ACK_STATUS)
 
-    async def async_prewarm(self, hold_seconds: float) -> None:
-        """Connect + authenticate now and keep the session for ``hold_seconds``.
+    @property
+    def holding(self) -> bool:
+        """True while a prewarmed session is being held open."""
+        return self._hold_handle is not None
 
-        A command sent inside the window reuses the session (no connect delay).
-        Calling again while warm just extends the window.
+    def set_hold_listener(self, listener: Callable[[], None] | None) -> None:
+        """Register a callback fired whenever ``holding`` may have changed."""
+        self._hold_listener = listener
+
+    def _notify_hold(self) -> None:
+        if self._hold_listener is not None:
+            self._hold_listener()
+
+    async def async_prewarm(self, max_seconds: float) -> None:
+        """Connect + authenticate now and hold the session for up to ``max_seconds``.
+
+        A command sent while held reuses the session (no connect delay) and the
+        hold ends with it. ``async_release`` ends the hold early. Calling again
+        while held restarts the ``max_seconds`` timer without reconnecting.
         """
         async with self._lock:
             self._cancel_hold()
@@ -218,13 +234,25 @@ class SolityBleClient:
                 await self._ensure_session()
             except BaseException:
                 await self._teardown()
+                self._notify_hold()
                 raise
             self._hold_handle = self.hass.loop.call_later(
-                hold_seconds, self._hold_expired
+                max_seconds, self._hold_expired
             )
+        self._notify_hold()
+
+    async def async_release(self) -> None:
+        """End a prewarm hold now and drop the session."""
+        async with self._lock:
+            if self._hold_handle is None and self._client is None:
+                return
+            self._cancel_hold()
+            await self._teardown()
+        self._notify_hold()
 
     async def async_shutdown(self) -> None:
         """Drop any warm session (integration unload)."""
+        self._hold_listener = None
         async with self._lock:
             self._cancel_hold()
             await self._teardown()
@@ -250,9 +278,10 @@ class SolityBleClient:
     async def _release(self, handle: asyncio.TimerHandle | None) -> None:
         async with self._lock:
             if self._hold_handle is not handle:
-                return  # window was extended or consumed by a command
+                return  # window was restarted, released or consumed by a command
             self._hold_handle = None
             await self._teardown()
+        self._notify_hold()
 
     async def _teardown(self) -> None:
         client, self._client, self._iv = self._client, None, None
@@ -345,6 +374,12 @@ class SolityBleClient:
     # ---- commands -------------------------------------------------------
 
     async def _run(self, cmd: int, suffix: bytes, ack: int) -> SolityStatus | None:
+        try:
+            return await self._run_locked(cmd, suffix, ack)
+        finally:
+            self._notify_hold()
+
+    async def _run_locked(self, cmd: int, suffix: bytes, ack: int) -> SolityStatus | None:
         async with self._lock:
             self._cancel_hold()
             warm = self._is_warm()
