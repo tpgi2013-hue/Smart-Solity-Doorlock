@@ -20,7 +20,7 @@ from homeassistant.helpers.event import async_call_later
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from . import SolityBleConfigEntry
-from .ble import SolityBleError
+from .ble import SolityBleError, SolityBleRejected
 from .const import (
     CONF_MAC,
     CONF_NAME,
@@ -91,6 +91,8 @@ class SolityBleLock(CoordinatorEntity[SolityBleCoordinator], LockEntity):
             status = await self._client.async_open()
         except SolityBleError as err:
             _LOGGER.warning("Solity BLE open failed: %s", err)
+            if isinstance(err, SolityBleRejected) and await self._real_state_is(False):
+                return  # already open (e.g. opened from inside) — nothing to do
             raise HomeAssistantError(f"BLE 열림 실패: {err}") from err
 
         # The captured status predates the open (battery/counts valid), so keep
@@ -111,6 +113,16 @@ class SolityBleLock(CoordinatorEntity[SolityBleCoordinator], LockEntity):
             self.hass, OPTIMISTIC_UNLOCK_SECONDS, _relock
         )
 
+    async def _real_state_is(self, locked: bool) -> bool:
+        """After a rejected command, re-read status so the state is real.
+
+        Returns True when the fresh status says the deadbolt is already in the
+        wanted position (the command was rejected because nothing to do).
+        """
+        await self.coordinator.async_refresh()
+        data = self.coordinator.data
+        return data is not None and data.is_locked is locked
+
     async def async_open(self, **kwargs: Any) -> None:
         await self.async_unlock(**kwargs)
 
@@ -120,6 +132,11 @@ class SolityBleLock(CoordinatorEntity[SolityBleCoordinator], LockEntity):
             status = await self._client.async_close()
         except SolityBleError as err:
             _LOGGER.warning("Solity BLE close failed: %s", err)
+            if isinstance(err, SolityBleRejected) and await self._real_state_is(True):
+                self._clear_relock()
+                self._optimistic_unlocked = False
+                self.async_write_ha_state()
+                return  # already locked — the shown state was stale
             raise HomeAssistantError(f"BLE 잠금 실패: {err}") from err
         self._clear_relock()
         self._optimistic_unlocked = False
@@ -134,4 +151,5 @@ class SolityBleLock(CoordinatorEntity[SolityBleCoordinator], LockEntity):
 
     async def async_will_remove_from_hass(self) -> None:
         self._clear_relock()
+        self.coordinator.cancel_recheck()
         await super().async_will_remove_from_hass()

@@ -23,4 +23,9 @@ MODEL = "WELKOM (BLE)"
 
 # How long a prewarmed (connected + authenticated) BLE session is held open
 # waiting for a command before it is dropped again.
-PREWARM_HOLD_SECONDS = 10
+PREWARM_HOLD_SECONDS = 8
+
+# While a status read shows the deadbolt retracted (door just used / left
+# open), re-read this often until it reports locked, at most this many times.
+UNLOCKED_RECHECK_SECONDS = 15
+UNLOCKED_RECHECK_MAX = 8

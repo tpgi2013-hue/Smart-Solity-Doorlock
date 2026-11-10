@@ -72,10 +72,22 @@ RECV_TIMEOUT = 6.0
 CMD_RECV_TIMEOUT = 8.0
 # After a command the lock may push one more 0xD1; it arrives within ~0.2 s.
 STATUS_DRAIN_TIMEOUT = 0.4
+# Pause before retrying a failed command on a fresh connection, so the retry
+# carries a new time-key second (precaution; the lock's rule is not documented).
+RETRY_DELAY = 1.1
 
 
 class SolityBleError(Exception):
     """A BLE command failed."""
+
+
+class SolityBleRejected(SolityBleError):
+    """The lock answered a command with a non-zero result."""
+
+    def __init__(self, cmd: int, result: int) -> None:
+        super().__init__(f"command 0x{cmd:02X} rejected (result={result})")
+        self.cmd = cmd
+        self.result = result
 
 
 @dataclass
@@ -340,12 +352,17 @@ class SolityBleClient:
                 try:
                     return await self._command(cmd, suffix, ack)
                 except SolityBleError as err:
-                    if not warm:
-                        raise
-                    # The prewarmed session went stale (lock dropped it);
-                    # retry once on a fresh connection.
-                    _LOGGER.debug("Solity BLE warm session failed (%s), retrying", err)
+                    # A warm session the lock already dropped, or a command
+                    # that landed while the session was ending, is rejected.
+                    # Retry once on a brand-new connection.
+                    _LOGGER.warning(
+                        "Solity BLE 0x%02X failed on %s session (%s), retrying on a new connection",
+                        cmd,
+                        "warm" if warm else "cold",
+                        err,
+                    )
                     await self._teardown()
+                    await asyncio.sleep(RETRY_DELAY)
                     return await self._command(cmd, suffix, ack)
             finally:
                 await self._teardown()
@@ -364,9 +381,7 @@ class SolityBleClient:
             # OPEN/CLOSE reply with a result byte; the 0xD1 status reply is
             # the payload itself (captured by _note), not a result.
             if cmd in (CMD_OPEN, CMD_CLOSE) and done[3] != 0:
-                raise SolityBleError(
-                    f"command 0x{cmd:02X} rejected (result={done[3]})"
-                )
+                raise SolityBleRejected(cmd, done[3])
 
             # Briefly drain to capture a pushed 0xD1 status.
             with contextlib.suppress(TimeoutError):
