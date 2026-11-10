@@ -1,6 +1,12 @@
-# Smart Solity Doorlock — Home Assistant 커스텀 통합
+# Smart Solity Doorlock (Cloud) — Home Assistant 커스텀 통합
 
 솔리티(SOLITY) 스마트 도어락을 **SmartThings 없이** 솔리티 클라우드 API로 직접 제어하는 HA 커스텀 통합.
+
+> **저장소 이름 변경 안내 (2026-11-11)** — `Smart-Solity-Doorlock` → **`Smart-Solity-Doorlock-Cloud`**.
+> 옛 주소는 자동으로 넘어오지만, HACS에서 업데이트가 안 보이면 HACS 사용자 지정 저장소를
+> `https://github.com/tpgi2013-hue/Smart-Solity-Doorlock-Cloud` 로 다시 추가해 주세요. 통합 자체(`solity`)와 설정은 그대로입니다.
+>
+> 블루투스팩(BLE)으로 클라우드 없이 직접 여는 통합은 별도 저장소 [Smart-Solity-Doorlock-BLE](https://github.com/tpgi2013-hue/Smart-Solity-Doorlock-BLE)에 있습니다.
 
 - 🔓 잠금/해제(열기) — `lock` 엔티티 (속성에 카드/비번/지문 개수 등)
 - 🔋 배터리 — `sensor`

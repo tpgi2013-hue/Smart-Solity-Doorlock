@@ -3,10 +3,10 @@
   "name": "Smart Solity Doorlock",
   "codeowners": [],
   "config_flow": true,
-  "documentation": "https://github.com/tpgi2013-hue/Smart-Solity-Doorlock",
+  "documentation": "https://github.com/tpgi2013-hue/Smart-Solity-Doorlock-Cloud",
   "integration_type": "device",
   "iot_class": "cloud_polling",
-  "issue_tracker": "https://github.com/tpgi2013-hue/Smart-Solity-Doorlock/issues",
+  "issue_tracker": "https://github.com/tpgi2013-hue/Smart-Solity-Doorlock-Cloud/issues",
   "requirements": [],
   "version": "1.7.6"
 }

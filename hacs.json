@@ -1,5 +1,5 @@
 {
-  "name": "Smart Solity Doorlock",
+  "name": "Smart Solity Doorlock (Cloud)",
   "render_readme": true,
   "homeassistant": "2024.12.0"
 }
